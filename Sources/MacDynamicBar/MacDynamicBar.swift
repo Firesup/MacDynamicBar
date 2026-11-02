@@ -1,4 +1,6 @@
 import AppKit
+import CoreMedia
+import ScreenCaptureKit
 import Combine
 import QuartzCore
 import SwiftUI
@@ -25,7 +27,7 @@ struct MacDynamicBar {
 // MARK: - Application Lifecycle
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var island: IslandWindowController?
     private var statusItem: NSStatusItem?
 
@@ -112,6 +114,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             to: menu
         )
 
+        addMenuItem(
+            "Audio-Reactive Waves",
+            action: #selector(toggleAudioReactiveWaves),
+            to: menu
+        )
+        menu.delegate = self
+
         menu.addItem(.separator())
 
         addMenuItem(
@@ -175,6 +184,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func refreshMusic() {
         island?.refreshMusic()
     }
+
+    @objc private func toggleAudioReactiveWaves() {
+        island?.toggleAudioReactiveWaves()
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.items.first { $0.action == #selector(toggleAudioReactiveWaves) }?.state =
+            island?.audioReactiveWavesEnabled == true ? .on : .off
+    }
 }
 
 // MARK: - Configuration
@@ -185,60 +203,62 @@ struct IslandConfiguration {
     var hoverEnabled = true
 
     // Space on each side of the physical notch when displaying music.
-    var miniPlayerWingWidth: CGFloat = 46
+    var miniPlayerWingWidth: CGFloat = 26
 
     var hoverWidthIncrease: CGFloat = 32
     var hoverHeightIncrease: CGFloat = 8
 
-    var expandedWidth: CGFloat = 460
-    var expandedContentHeight: CGFloat = 190
+    var expandedWidth: CGFloat = 400
+    var expandedContentHeight: CGFloat = 174
 
-    var animationDuration: TimeInterval = 0.22
 }
 
 // MARK: - Presentation State
 
 enum IslandPresentation: Equatable {
-    case compact
-    case hover
-    case expanded
+    case compact, hover, expanded
 }
 
-/// Hover is temporary. Clicking keeps the full panel open
-/// even after the pointer leaves.
 @MainActor
 final class IslandState: ObservableObject {
     @Published private(set) var presentation: IslandPresentation = .compact
-
     private var isHovered = false
     private let hoverEnabled: Bool
+    private var hoverExitTask: Task<Void, Never>?
 
-    var isExpanded: Bool {
-        presentation == .expanded
-    }
+    var isExpanded: Bool { presentation == .expanded }
 
-    init(hoverEnabled: Bool = true) {
-        self.hoverEnabled = hoverEnabled
-    }
+    init(hoverEnabled: Bool = true) { self.hoverEnabled = hoverEnabled }
 
     func setHovered(_ hovered: Bool) {
+        guard hovered != isHovered else { return }
         isHovered = hovered
-
-        // Moving the pointer away must not close a clicked-open panel.
+        hoverExitTask?.cancel()
+        hoverExitTask = nil
         guard !isExpanded else { return }
-
-        presentation = hovered && hoverEnabled ? .hover : .compact
-    }
-
-    func toggle() {
-        if isExpanded {
-            presentation = isHovered && hoverEnabled ? .hover : .compact
+        if hovered {
+            presentation = hoverEnabled ? .hover : .compact
         } else {
-            presentation = .expanded
+            hoverExitTask = Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: .milliseconds(120)) }
+                catch { return }
+                guard let self, !self.isHovered, !self.isExpanded else { return }
+                self.presentation = .compact
+            }
         }
     }
 
+    func toggle() {
+        hoverExitTask?.cancel()
+        hoverExitTask = nil
+        presentation = isExpanded
+            ? (isHovered && hoverEnabled ? .hover : .compact)
+            : .expanded
+    }
+
     func collapse() {
+        hoverExitTask?.cancel()
+        hoverExitTask = nil
         isHovered = false
         presentation = .compact
     }
@@ -345,256 +365,311 @@ final class IslandPanel: NSPanel {
     }
 }
 
-// MARK: - Mouse Tracking
+// MARK: - Interruptible Surface Animation
 
-/// Tracks hovering even while another application has keyboard focus.
-final class IslandHostingView: NSHostingView<IslandView> {
-    var hoverChanged: ((Bool) -> Void)?
 
-    private var hoverArea: NSTrackingArea?
+/// An exact critically damped spring. Retargeting preserves current velocity.
+struct SurfaceSpring {
+    var value: Double
+    var velocity = 0.0
+    var target: Double
 
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
+    mutating func advance(by dt: Double) {
+        let omega = 24.0
+        let displacement = value - target
+        let coefficient = velocity + omega * displacement
+        let decay = exp(-omega * dt)
+        value = target + (displacement + coefficient * dt) * decay
+        velocity = (velocity - omega * coefficient * dt) * decay
+    }
 
-        if let hoverArea {
-            removeTrackingArea(hoverArea)
+    var settled: Bool { abs(value - target) < 0.05 && abs(velocity) < 0.5 }
+    mutating func finish() { value = target; velocity = 0 }
+}
+
+/// The window never resizes during interactions. One backing surface owns
+/// the fill, clipping, content bounds and hit region on every animation tick.
+@MainActor
+final class IslandHostingView: NSView {
+    let host: NSHostingView<IslandView>
+    var regionChanged: (() -> Void)?
+
+    private var widthSpring = SurfaceSpring(value: 1, target: 1)
+    private var heightSpring = SurfaceSpring(value: 1, target: 1)
+    private var cornerSpring = SurfaceSpring(value: 14, target: 14)
+    private var ticker: Timer?
+    private var lastTick = 0.0
+    private var surfacePath = CGPath(rect: .zero, transform: nil)
+    private var surfaceRect = CGRect.zero
+    private let surfaceMask = CAShapeLayer()
+
+    init(rootView: IslandView) {
+        host = NSHostingView(rootView: rootView)
+        super.init(frame: .zero)
+        wantsLayer = true
+        host.sizingOptions = []
+        host.wantsLayer = true
+        host.layer?.backgroundColor = NSColor.black.cgColor
+        host.layer?.mask = surfaceMask
+        addSubview(host)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+    override var isFlipped: Bool { true }
+
+    func move(to size: CGSize, expanded: Bool, animated: Bool) {
+        widthSpring.target = size.width
+        heightSpring.target = size.height
+        cornerSpring.target = expanded ? 32 : 14
+        if !animated {
+            stopAnimating()
+            widthSpring.finish()
+            heightSpring.finish()
+            cornerSpring.finish()
+            applySurface()
+            return
         }
-
-        let area = NSTrackingArea(
-            rect: .zero,
-            options: [
-                .mouseEnteredAndExited,
-                .activeAlways,
-                .inVisibleRect
-            ],
-            owner: self,
-            userInfo: nil
-        )
-
-        addTrackingArea(area)
-        hoverArea = area
+        guard ticker == nil else { return }
+        lastTick = CACurrentMediaTime()
+        let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick() }
+        }
+        ticker = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
-    override func mouseEntered(with event: NSEvent) {
-        hoverChanged?(true)
+    func stopAnimating() {
+        ticker?.invalidate()
+        ticker = nil
     }
 
-    override func mouseExited(with event: NSEvent) {
-        hoverChanged?(false)
+    override func layout() {
+        super.layout()
+        applySurface()
+    }
+
+    func containsScreenPoint(_ point: NSPoint) -> Bool {
+        guard let window else { return false }
+        let local = convert(window.convertPoint(fromScreen: point), from: nil)
+        let inSurface = CGPoint(x: local.x - surfaceRect.minX,
+                                y: local.y - surfaceRect.minY)
+        return surfacePath.contains(inSurface)
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        let inSurface = CGPoint(x: local.x - surfaceRect.minX,
+                                y: local.y - surfaceRect.minY)
+        guard surfacePath.contains(inSurface) else { return nil }
+        return super.hitTest(point)
+    }
+
+    private func tick() {
+        let now = CACurrentMediaTime()
+        let dt = max(0, now - lastTick)
+        lastTick = now
+        widthSpring.advance(by: dt)
+        heightSpring.advance(by: dt)
+        cornerSpring.advance(by: dt)
+        if widthSpring.settled && heightSpring.settled && cornerSpring.settled {
+            widthSpring.finish()
+            heightSpring.finish()
+            cornerSpring.finish()
+            stopAnimating()
+        }
+        applySurface()
+    }
+
+    private func applySurface() {
+        let size = CGSize(width: min(bounds.width, max(1, widthSpring.value)),
+                          height: min(bounds.height, max(1, heightSpring.value)))
+        surfaceRect = CGRect(x: (bounds.width - size.width) / 2,
+                             y: 0, width: size.width, height: size.height)
+        let radius = min(cornerSpring.value, size.height / 2, size.width / 2)
+        surfacePath = CGPath(roundedRect: CGRect(origin: .zero, size: size),
+                             cornerWidth: radius, cornerHeight: radius,
+                             transform: nil)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        host.frame = surfaceRect
+        surfaceMask.frame = CGRect(origin: .zero, size: size)
+        surfaceMask.path = surfacePath
+        CATransaction.commit()
+        regionChanged?()
     }
 }
 
+
 // MARK: - Window Controller
 
-/// Owns display selection, positioning, animation, and outside clicks.
 @MainActor
 final class IslandWindowController {
     private let panel = IslandPanel()
     private let state: IslandState
     private let configuration: IslandConfiguration
-
     private let player = AppleMusicPlayer()
-
+    private let audio = MusicAudioLevels()
     private var layout: IslandLayout?
-    private var expansionSubscription: AnyCancellable?
-    private var trackSubscription: AnyCancellable?
+    private var hostingView: IslandHostingView?
+    private var subscriptions = Set<AnyCancellable>()
+    private var localMonitor: Any?
+    private var globalMonitor: Any?
+    private var isShown = false
 
-    private var localClickMonitor: Any?
-    private var globalClickMonitor: Any?
-
-    func refreshMusic() {
-    player.refresh()
-}
-    private func setMiniPlayerVisible(_ visible: Bool) {
-    guard var layout else { return }
-
-    layout.showsMiniPlayer = visible
-    self.layout = layout
-
-    resize(presentation: state.presentation)
-}
+    var audioReactiveWavesEnabled: Bool { audio.isEnabled }
 
     init(configuration: IslandConfiguration = IslandConfiguration()) {
         self.configuration = configuration
-        self.state = IslandState(
-            hoverEnabled: configuration.hoverEnabled
-        )
-
-        expansionSubscription = state.$presentation
-            .removeDuplicates()
-            .sink { [weak self] presentation in
-                self?.resize(presentation: presentation)
-            }
-
-        trackSubscription = player.$track
-    .map { $0 != nil }
-    .removeDuplicates()
-    .sink { [weak self] visible in
-        self?.setMiniPlayerVisible(visible)
-    }
-
-        installClickMonitors()
+        self.state = IslandState(hoverEnabled: configuration.hoverEnabled)
+        state.$presentation.removeDuplicates().sink { [weak self] presentation in
+            self?.resize(presentation: presentation)
+        }.store(in: &subscriptions)
+        player.$track.map { $0 != nil }.removeDuplicates().sink { [weak self] visible in
+            guard let self, var layout = self.layout else { return }
+            layout.showsMiniPlayer = visible
+            self.layout = layout
+            self.updateRootView()
+            self.resize(presentation: self.state.presentation)
+        }.store(in: &subscriptions)
+        player.$isPlaying.removeDuplicates().sink { [weak self] playing in
+            self?.audio.setPlaying(playing)
+        }.store(in: &subscriptions)
+        installMonitors()
         player.start()
     }
 
+    func refreshMusic() { player.refresh() }
+
+    func toggleAudioReactiveWaves() {
+        // Toggling off/on also retries capture after changing system access.
+        audio.setEnabled(!audio.isEnabled)
+    }
+
     func show() {
-        guard let screen = preferredScreen else {
-            panel.orderOut(nil)
-            return
-        }
-
+        guard let screen = preferredScreen else { hide(); return }
         let hasNotch = screen.safeAreaInsets.top > 0
-        let leftArea = screen.auxiliaryTopLeftArea
-        let rightArea = screen.auxiliaryTopRightArea
-
         let notchWidth: CGFloat
         let notchCenterX: CGFloat
-
-        if hasNotch, let leftArea, let rightArea {
-            // The gap between the menu-bar areas is the notch.
-            notchWidth = max(1, rightArea.minX - leftArea.maxX)
-            notchCenterX = (leftArea.maxX + rightArea.minX) / 2
+        if hasNotch, let left = screen.auxiliaryTopLeftArea,
+           let right = screen.auxiliaryTopRightArea {
+            notchWidth = max(1, right.minX - left.maxX)
+            notchCenterX = (left.maxX + right.minX) / 2
         } else {
-            // Fallback for a display without a physical notch.
             notchWidth = 160
             notchCenterX = screen.frame.midX
         }
-
         let layout = IslandLayout(
-    screenFrame: screen.frame,
-    notchWidth: notchWidth,
-    notchHeight: hasNotch ? screen.safeAreaInsets.top : 28,
-    showsMiniPlayer: player.track != nil,
-    notchCenterX: notchCenterX,
-    configuration: configuration
-)
-
+            screenFrame: screen.frame, notchWidth: notchWidth,
+            notchHeight: hasNotch ? screen.safeAreaInsets.top : 28,
+            showsMiniPlayer: player.track != nil, notchCenterX: notchCenterX,
+            configuration: configuration)
         self.layout = layout
-
-        let hostingView = IslandHostingView(
-            rootView: IslandView(
-                state: state,
-                player: player,
-                layout: layout
-            )
-        )
-
-        // Window dimensions are controlled explicitly by this controller.
-        hostingView.sizingOptions = []
-
-        hostingView.hoverChanged = { [weak self] hovered in
-            self?.state.setHovered(hovered)
-        }
-
-        panel.contentView = hostingView
-
-        panel.setFrame(
-            layout.frame(for: state.presentation),
-            display: true
-        )
-
+        hostingView?.stopAnimating()
+        let host = IslandHostingView(rootView: IslandView(
+            state: state, player: player, audio: audio, layout: layout))
+        hostingView = host
+        host.regionChanged = { [weak self] in self?.updatePointer() }
+        panel.contentView = host
+        // The transparent canvas stays fixed throughout all interactions.
+        let expanded = layout.size(for: .expanded)
+        let hover = layout.size(for: .hover)
+        let canvasSize = CGSize(width: max(expanded.width, hover.width),
+                                height: max(expanded.height, hover.height))
+        let originX = min(max(notchCenterX - canvasSize.width / 2, screen.frame.minX),
+                          screen.frame.maxX - canvasSize.width)
+        panel.setFrame(CGRect(x: originX, y: screen.frame.maxY - canvasSize.height,
+                              width: canvasSize.width, height: canvasSize.height),
+                       display: true)
+        host.frame = CGRect(origin: .zero, size: canvasSize)
+        panel.acceptsMouseMovedEvents = true
+        panel.ignoresMouseEvents = true
+        isShown = true
+        host.move(to: layout.size(for: state.presentation),
+                  expanded: state.isExpanded, animated: false)
         panel.orderFrontRegardless()
+        audio.setSuspended(false)
+        updatePointer()
     }
 
     func toggle() {
+        if !isShown { show() }
         state.toggle()
         panel.orderFrontRegardless()
     }
 
     func hide() {
+        isShown = false
         state.collapse()
+        hostingView?.stopAnimating()
+        panel.ignoresMouseEvents = true
         panel.orderOut(nil)
+        audio.setSuspended(true)
     }
 
     func stop() {
-        player.stop() // Refreshes the initial state without keeping observers.
-        expansionSubscription?.cancel()
-        trackSubscription?.cancel()
-
-        if let localClickMonitor {
-            NSEvent.removeMonitor(localClickMonitor)
-        }
-
-        if let globalClickMonitor {
-            NSEvent.removeMonitor(globalClickMonitor)
-        }
-
-        localClickMonitor = nil
-        globalClickMonitor = nil
-
+        hide()
+        player.stop()
+        audio.stop()
+        subscriptions.removeAll()
+        if let localMonitor { NSEvent.removeMonitor(localMonitor) }
+        if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
+        localMonitor = nil
+        globalMonitor = nil
         panel.close()
     }
 
     private var preferredScreen: NSScreen? {
-        // NSScreen.main changes with keyboard focus.
-        // Prefer the built-in display instead.
         NSScreen.screens.first { screen in
-            let key = NSDeviceDescriptionKey("NSScreenNumber")
-
-            guard let number = screen.deviceDescription[key] as? NSNumber else {
-                return false
-            }
-
-            let displayID = CGDirectDisplayID(number.uint32Value)
-
-            return CGDisplayIsBuiltin(displayID) != 0
+            guard let number = screen.deviceDescription[
+                NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return false }
+            return CGDisplayIsBuiltin(CGDirectDisplayID(number.uint32Value)) != 0
         } ?? NSScreen.screens.first
+    }
+
+    private func updateRootView() {
+        guard let layout else { return }
+        hostingView?.host.rootView = IslandView(
+            state: state, player: player, audio: audio, layout: layout)
     }
 
     private func resize(presentation: IslandPresentation) {
         guard let layout else { return }
+        hostingView?.move(to: layout.size(for: presentation),
+                          expanded: presentation == .expanded,
+                          animated: isShown && !NSWorkspace.shared
+                            .accessibilityDisplayShouldReduceMotion)
+    }
 
-        let frame = layout.frame(for: presentation)
-        let reduceMotion = NSWorkspace.shared
-            .accessibilityDisplayShouldReduceMotion
+    private func updatePointer() {
+        let inside = isShown && (hostingView?.containsScreenPoint(
+            NSEvent.mouseLocation) ?? false)
+        // Transparent canvas space must pass clicks to the application below.
+        panel.ignoresMouseEvents = !inside
+        state.setHovered(inside)
+    }
 
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = reduceMotion
-                ? 0
-                : configuration.animationDuration
-
-            context.timingFunction = CAMediaTimingFunction(
-                name: .easeInEaseOut
-            )
-
-            panel.animator().setFrame(frame, display: true)
+    private func handleEvent(isClick: Bool) {
+        updatePointer()
+        if isClick, state.isExpanded,
+           hostingView?.containsScreenPoint(NSEvent.mouseLocation) != true {
+            state.collapse()
         }
     }
 
-    private func installClickMonitors() {
-        let clicks: NSEvent.EventTypeMask = [
-            .leftMouseDown,
-            .rightMouseDown,
-            .otherMouseDown
+    private func installMonitors() {
+        let mask: NSEvent.EventTypeMask = [
+            .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
+            .leftMouseDown, .rightMouseDown, .otherMouseDown
         ]
-
-        // Clicks delivered to Minnow.
-        localClickMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: clicks
-        ) { [weak self] event in
-            MainActor.assumeIsolated {
-                self?.collapseIfOutside()
-            }
-
-            // Preserve normal delivery of the click.
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+            let click = [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type)
+            MainActor.assumeIsolated { self?.handleEvent(isClick: click) }
             return event
         }
-
-        // Clicks delivered to other applications.
-        globalClickMonitor = NSEvent.addGlobalMonitorForEvents(
-            matching: clicks
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.collapseIfOutside()
-            }
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
+            let click = [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type)
+            Task { @MainActor [weak self] in self?.handleEvent(isClick: click) }
         }
-    }
-
-    private func collapseIfOutside() {
-        guard state.isExpanded else { return }
-        guard !panel.frame.contains(NSEvent.mouseLocation) else { return }
-
-        state.collapse()
     }
 }
 
@@ -629,37 +704,12 @@ struct AlbumCover: View {
     }
 }
 
-// MARK: - Playback Indicator
-
-/// Indicates playback activity, not measured audio amplitude.
-struct PlaybackIndicator: View {
-    let isPlaying: Bool
-
-    @Environment(\.accessibilityReduceMotion)
-    private var reduceMotion
-
-    var body: some View {
-        Image(systemName: "waveform")
-            .font(.system(size: 19, weight: .semibold))
-            .foregroundStyle(
-                isPlaying ? Color.pink : Color.gray
-            )
-            .symbolEffect(
-                .variableColor.iterative,
-                options: .repeating,
-                isActive: isPlaying && !reduceMotion
-            )
-            .accessibilityLabel(
-                isPlaying ? "Playing" : "Paused"
-            )
-    }
-}
-
 // MARK: - Island Interface
 
 struct IslandView: View {
     @ObservedObject var state: IslandState
     @ObservedObject var player: AppleMusicPlayer
+    @ObservedObject var audio: MusicAudioLevels
 
     let layout: IslandLayout
 
@@ -668,41 +718,24 @@ struct IslandView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-
-            if state.isExpanded {
-                expandedPlayer
-                    .frame(
-                        height: layout.configuration.expandedContentHeight
-                    )
-                    .transition(.opacity)
-            }
-
+            header.fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
-        .frame(
-            maxWidth: .infinity,
-            maxHeight: .infinity,
-            alignment: .top
-        )
-        .background(.black)
-        .clipShape(
-            UnevenRoundedRectangle(
-                topLeadingRadius: state.isExpanded ? 32 : 0,
-                bottomLeadingRadius: state.isExpanded ? 42 : 14,
-                bottomTrailingRadius: state.isExpanded ? 42 : 14,
-                topTrailingRadius: state.isExpanded ? 32 : 0
-            )
-        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .overlay(alignment: .top) {
+            // Overlay keeps the expanded content's fixed width from forcing
+            // the compact header wider than the actual visible surface.
+            expandedPlayer
+                .frame(width: layout.size(for: .expanded).width,
+                       height: layout.configuration.expandedContentHeight)
+                .padding(.top, layout.headerHeight)
+                .opacity(state.isExpanded ? 1 : 0)
+                .allowsHitTesting(state.isExpanded)
+                .accessibilityHidden(!state.isExpanded)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.12),
+                           value: state.isExpanded)
+        }
         .preferredColorScheme(.dark)
-        .animation(
-            reduceMotion
-                ? nil
-                : .easeInOut(
-                    duration: layout.configuration.animationDuration
-                ),
-            value: state.presentation
-        )
     }
 
     // MARK: Compact Player / Header
@@ -714,7 +747,7 @@ struct IslandView: View {
                 if !state.isExpanded, player.track != nil {
                     AlbumCover(
                         image: player.artwork,
-                        size: min(24, layout.notchHeight - 4)
+                        size: min(20, layout.notchHeight - 6)
                     )
                     .frame(maxWidth: .infinity)
                 } else {
@@ -730,7 +763,7 @@ struct IslandView: View {
                 Group {
                     if !state.isExpanded, player.track != nil {
                         PlaybackIndicator(
-                            isPlaying: player.isPlaying
+                            isPlaying: player.isPlaying, audio: audio
                         )
                     } else if state.isExpanded {
                         Image(systemName: "chevron.up")
@@ -767,11 +800,11 @@ struct IslandView: View {
     // MARK: Expanded Player
 
     private var expandedPlayer: some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 14) {
+        VStack(spacing: 10) {
+            HStack(spacing: 12) {
                 AlbumCover(
                     image: player.artwork,
-                    size: 64
+                    size: 54
                 )
 
                 VStack(alignment: .leading, spacing: 4) {
@@ -788,12 +821,20 @@ struct IslandView: View {
                         )
                         .foregroundStyle(.gray)
                         .lineLimit(1)
+
+                    if player.isPlaying && !audio.hasAudioSignal {
+                        Text(audio.status)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .help(audio.status)
+                    }
                 }
 
                 Spacer(minLength: 8)
 
                 PlaybackIndicator(
-                    isPlaying: player.isPlaying
+                    isPlaying: player.isPlaying, audio: audio
                 )
             }
 
@@ -924,8 +965,6 @@ struct IslandView: View {
             + String(format: "%02d", value % 60)
     }
 }
-
-// MARK: - Preview Playback
 
 // MARK: - Apple Music Track
 
@@ -1295,4 +1334,299 @@ with timeout of 2 seconds
     end tell
 end timeout
 """
+}
+
+// MARK: - Audio-Reactive Playback Levels
+
+/// A short audio envelope history, measured from PCM samples rather than
+/// a decorative repeating animation. Kept independent for deterministic tests.
+struct AudioEnvelope {
+    private(set) var levels = [Float](repeating: 0, count: 5)
+
+    mutating func consume(rms: Float) -> [Float] {
+        let safe = rms.isFinite ? max(0, rms) : 0
+        // A linear-energy curve gives music more visible movement than a
+        // wide decibel range that pushes most mastered tracks near full height.
+        let measured = min(1, sqrt(max(0, safe - 0.001)) * 1.6)
+        let previous = levels.last ?? 0
+        let smoothing: Float = measured > previous ? 0.75 : 0.35
+        let next = previous + (measured - previous) * smoothing
+        levels.removeFirst()
+        levels.append(next < 0.005 ? 0 : next)
+        return levels
+    }
+}
+
+/// Only this serial capture queue accesses the mutable envelope and timestamp.
+/// Callback payloads contain Sendable numbers, never CMSampleBuffer objects.
+final class MusicAudioOutput: NSObject, SCStreamOutput, SCStreamDelegate,
+                              @unchecked Sendable {
+    let onLevels: @Sendable ([Float]) -> Void
+    let onStop: @Sendable (String) -> Void
+    private var envelope = AudioEnvelope()
+    private var lastDelivery = 0.0
+
+    init(onLevels: @escaping @Sendable ([Float]) -> Void,
+         onStop: @escaping @Sendable (String) -> Void) {
+        self.onLevels = onLevels
+        self.onStop = onStop
+    }
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        onStop(error.localizedDescription)
+    }
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
+                of outputType: SCStreamOutputType) {
+        guard outputType == .audio, sampleBuffer.isValid,
+              let format = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format),
+              asbd.pointee.mFormatID == kAudioFormatLinearPCM,
+              asbd.pointee.mFormatFlags & kAudioFormatFlagIsFloat != 0,
+              asbd.pointee.mBitsPerChannel == 32 else { return }
+
+        // ScreenCaptureKit supplies native-endian float PCM. The returned
+        // block buffer keeps the audio storage alive until analysis finishes.
+        var required = 0
+        CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer, bufferListSizeNeededOut: &required,
+            bufferListOut: nil, bufferListSize: 0,
+            blockBufferAllocator: nil, blockBufferMemoryAllocator: nil,
+            flags: 0, blockBufferOut: nil)
+        guard required > 0 else { return }
+        let memory = UnsafeMutableRawPointer.allocate(
+            byteCount: required, alignment: MemoryLayout<AudioBufferList>.alignment)
+        defer { memory.deallocate() }
+        let list = memory.bindMemory(to: AudioBufferList.self, capacity: 1)
+        var block: CMBlockBuffer?
+        let result = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer, bufferListSizeNeededOut: nil,
+            bufferListOut: list, bufferListSize: required,
+            blockBufferAllocator: nil, blockBufferMemoryAllocator: nil,
+            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+            blockBufferOut: &block)
+        guard result == noErr else { return }
+
+        let now = CACurrentMediaTime()
+        guard now - lastDelivery >= 1.0 / 30.0 else { return }
+        lastDelivery = now
+        var sum = 0.0
+        var count = 0
+        withExtendedLifetime(block) {
+            for buffer in UnsafeMutableAudioBufferListPointer(list) {
+                guard let data = buffer.mData else { continue }
+                let samples = data.assumingMemoryBound(to: Float.self)
+                let sampleCount = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
+                // Square channels separately so opposite-phase stereo does
+                // not cancel out and incorrectly appear silent.
+                for index in 0..<sampleCount {
+                    let sample = samples[index]
+                    guard sample.isFinite else { continue }
+                    sum += Double(sample) * Double(sample)
+                    count += 1
+                }
+            }
+        }
+        guard count > 0 else { return }
+        onLevels(envelope.consume(rms: Float(sqrt(sum / Double(count)))))
+    }
+}
+
+@MainActor
+final class MusicAudioLevels: ObservableObject {
+    @Published private(set) var levels = [Float](repeating: 0, count: 5)
+    @Published private(set) var isEnabled: Bool
+    @Published private(set) var hasAudioSignal = false
+    @Published private(set) var status: String
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        // First launch should request capture when Music plays. Respect an
+        // explicit saved choice to turn the feature off.
+        let enabled = defaults.object(forKey: "audioReactiveWavesEnabled") as? Bool ?? true
+        isEnabled = enabled
+        status = enabled ? "Waiting for Music audio" : "Audio-reactive waves off"
+    }
+
+    private var stream: SCStream?
+    private var output: MusicAudioOutput?
+    private let audioQueue = DispatchQueue(label: "com.minnow.audio-levels",
+                                           qos: .userInteractive)
+    private var wantsPlayback = false
+    private var suspended = false
+    private var generation = 0
+    private var reconcileTask: Task<Void, Never>?
+    private var silenceTask: Task<Void, Never>?
+    private var firstSampleTask: Task<Void, Never>?
+
+    func setEnabled(_ enabled: Bool) {
+        isEnabled = enabled
+        defaults.set(enabled, forKey: "audioReactiveWavesEnabled")
+        status = enabled ? "Waiting for Apple Music playback" : "Audio-reactive waves off"
+        requestUpdate()
+    }
+
+    func setPlaying(_ playing: Bool) {
+        guard wantsPlayback != playing else { return }
+        wantsPlayback = playing
+        requestUpdate()
+    }
+
+    func setSuspended(_ value: Bool) {
+        guard suspended != value else { return }
+        suspended = value
+        requestUpdate()
+    }
+
+    func stop() {
+        isEnabled = false // Does not change the saved user preference.
+        wantsPlayback = false
+        requestUpdate()
+    }
+
+    private var shouldCapture: Bool { isEnabled && wantsPlayback && !suspended }
+
+    private func requestUpdate() {
+        generation += 1
+        silenceTask?.cancel()
+        firstSampleTask?.cancel()
+        hasAudioSignal = false
+        levels = Array(repeating: 0, count: 5)
+        // Serialize asynchronous start/stop operations. A changed generation
+        // causes the in-flight setup to be discarded before it can publish.
+        guard reconcileTask == nil else { return }
+        reconcileTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while true {
+                let version = self.generation
+                await self.reconcile(version: version)
+                if version == self.generation { break }
+            }
+            self.reconcileTask = nil
+        }
+    }
+
+    private func reconcile(version: Int) async {
+        if let oldStream = stream {
+            stream = nil
+            try? await oldStream.stopCapture()
+            output = nil
+        }
+        guard version == generation else { return }
+        guard shouldCapture else {
+            status = isEnabled ? "Waiting for Music playback" : "Audio-reactive waves off"
+            return
+        }
+        status = "Starting audio capture…"
+        do {
+            // macOS handles capture consent here. Audio is filtered to Music;
+            // no microphone, screen output handler or file writer is added.
+            let content = try await SCShareableContent.excludingDesktopWindows(
+                false, onScreenWindowsOnly: false)
+            guard version == generation, shouldCapture else { return }
+            guard let display = content.displays.first,
+                  let music = content.applications.first(where: {
+                      $0.bundleIdentifier == "com.apple.Music"
+                  }) else {
+                status = "Apple Music audio is not available"
+                return
+            }
+            let filter = SCContentFilter(display: display, including: [music],
+                                         exceptingWindows: [])
+            let configuration = SCStreamConfiguration()
+            configuration.capturesAudio = true
+            configuration.excludesCurrentProcessAudio = true
+            configuration.sampleRate = 48000
+            configuration.channelCount = 2
+            configuration.width = 2
+            configuration.height = 2
+            configuration.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+            configuration.showsCursor = false
+
+            let sink = MusicAudioOutput(onLevels: { [weak self] values in
+                Task { @MainActor [weak self] in
+                    guard let self, self.generation == version,
+                          self.shouldCapture else { return }
+                    self.receive(values)
+                }
+            }, onStop: { [weak self] message in
+                Task { @MainActor [weak self] in
+                    guard let self, self.generation == version else { return }
+                    self.levels = Array(repeating: 0, count: 5)
+                    self.hasAudioSignal = false
+                    self.firstSampleTask?.cancel()
+                    self.silenceTask?.cancel()
+                    self.status = "Audio capture stopped: \(message)"
+                }
+            })
+            let candidate = SCStream(filter: filter, configuration: configuration,
+                                     delegate: sink)
+            try candidate.addStreamOutput(sink, type: .audio,
+                                           sampleHandlerQueue: audioQueue)
+            try await candidate.startCapture()
+            guard version == generation, shouldCapture else {
+                try? await candidate.stopCapture()
+                return
+            }
+            output = sink
+            stream = candidate
+            status = "Waiting for Music audio"
+            firstSampleTask = Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: .seconds(2)) }
+                catch { return }
+                guard let self, self.generation == version else { return }
+                self.status = "No audio received — check capture access"
+            }
+        } catch {
+            guard version == generation else { return }
+            let detail = error as NSError
+            status = "Capture unavailable (\(detail.code)): \(detail.localizedDescription)"
+            levels = Array(repeating: 0, count: 5)
+        }
+    }
+
+    private func receive(_ values: [Float]) {
+        firstSampleTask?.cancel()
+        firstSampleTask = nil
+        levels = values
+        hasAudioSignal = values.contains { $0 > 0.01 }
+        status = hasAudioSignal ? "Listening to Apple Music" : "Music is sending silent audio"
+        silenceTask?.cancel()
+        // Some sources stop sending samples during silence. A one-shot reset
+        // prevents frozen bars; it does not poll Music or the capture stream.
+        silenceTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .milliseconds(250)) }
+            catch { return }
+            self?.levels = Array(repeating: 0, count: 5)
+            self?.hasAudioSignal = false
+            self?.status = "Waiting for Music audio"
+        }
+    }
+}
+
+struct PlaybackIndicator: View {
+    let isPlaying: Bool
+    @ObservedObject var audio: MusicAudioLevels
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 1.5) {
+            ForEach(0..<5, id: \.self) { index in
+                Capsule()
+                    .fill(isPlaying ? Color.pink : Color.gray)
+                    .frame(width: 2.5, height: barHeight(index))
+            }
+        }
+        .frame(width: 18.5, height: 18)
+        .animation(reduceMotion ? nil : .linear(duration: 0.06), value: audio.levels)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(isPlaying ? "Playing" : "Paused")
+        .help(audio.status)
+    }
+
+    private func barHeight(_ index: Int) -> CGFloat {
+        guard isPlaying, !reduceMotion else { return 4 }
+        return 3 + CGFloat(audio.levels[index]) * 15
+    }
 }
