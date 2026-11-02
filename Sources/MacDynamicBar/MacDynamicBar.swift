@@ -106,6 +106,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             to: menu
         )
 
+        addMenuItem(
+            "Refresh Apple Music",
+            action: #selector(refreshMusic),
+            to: menu
+        )
+
         menu.addItem(.separator())
 
         addMenuItem(
@@ -165,6 +171,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func quit() {
         NSApp.terminate(nil)
     }
+
+    @objc private func refreshMusic() {
+        island?.refreshMusic()
+    }
 }
 
 // MARK: - Configuration
@@ -174,14 +184,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct IslandConfiguration {
     var hoverEnabled = true
 
-    // Total width increase: 16 points on each side.
-    var hoverWidthIncrease: CGFloat = 32
+    // Space on each side of the physical notch when displaying music.
+    var miniPlayerWingWidth: CGFloat = 46
 
-    // Additional height below the physical notch.
+    var hoverWidthIncrease: CGFloat = 32
     var hoverHeightIncrease: CGFloat = 8
 
-    var expandedWidth: CGFloat = 420
-    var expandedContentHeight: CGFloat = 180
+    var expandedWidth: CGFloat = 460
+    var expandedContentHeight: CGFloat = 190
 
     var animationDuration: TimeInterval = 0.22
 }
@@ -242,7 +252,7 @@ struct IslandLayout {
     let screenFrame: CGRect
     let notchWidth: CGFloat
     let notchHeight: CGFloat
-
+    var showsMiniPlayer = false
     var notchCenterX: CGFloat? = nil
     var configuration = IslandConfiguration()
 
@@ -251,28 +261,34 @@ struct IslandLayout {
     }
 
     func size(for presentation: IslandPresentation) -> CGSize {
-        let width: CGFloat
-        let height: CGFloat
+    let wingsWidth = showsMiniPlayer
+        ? configuration.miniPlayerWingWidth * 2
+        : 0
 
-        switch presentation {
-        case .compact:
-            width = notchWidth
-            height = notchHeight
+    let compactWidth = notchWidth + wingsWidth
 
-        case .hover:
-            width = notchWidth + configuration.hoverWidthIncrease
-            height = notchHeight + configuration.hoverHeightIncrease
+    let width: CGFloat
+    let height: CGFloat
 
-        case .expanded:
-            width = max(configuration.expandedWidth, notchWidth)
-            height = notchHeight + configuration.expandedContentHeight
-        }
+    switch presentation {
+    case .compact:
+        width = compactWidth
+        height = notchHeight
 
-        return CGSize(
-            width: min(width, screenFrame.width),
-            height: min(height, screenFrame.height)
-        )
+    case .hover:
+        width = compactWidth + configuration.hoverWidthIncrease
+        height = notchHeight + configuration.hoverHeightIncrease
+
+    case .expanded:
+        width = max(configuration.expandedWidth, compactWidth)
+        height = notchHeight + configuration.expandedContentHeight
     }
+
+    return CGSize(
+        width: min(width, screenFrame.width),
+        height: min(height, screenFrame.height)
+    )
+}
 
     func frame(for presentation: IslandPresentation) -> CGRect {
         let size = size(for: presentation)
@@ -377,13 +393,26 @@ final class IslandWindowController {
     private let state: IslandState
     private let configuration: IslandConfiguration
 
-    private let player = PreviewPlayer()
+    private let player = AppleMusicPlayer()
 
     private var layout: IslandLayout?
     private var expansionSubscription: AnyCancellable?
+    private var trackSubscription: AnyCancellable?
 
     private var localClickMonitor: Any?
     private var globalClickMonitor: Any?
+
+    func refreshMusic() {
+    player.refresh()
+}
+    private func setMiniPlayerVisible(_ visible: Bool) {
+    guard var layout else { return }
+
+    layout.showsMiniPlayer = visible
+    self.layout = layout
+
+    resize(presentation: state.presentation)
+}
 
     init(configuration: IslandConfiguration = IslandConfiguration()) {
         self.configuration = configuration
@@ -397,7 +426,15 @@ final class IslandWindowController {
                 self?.resize(presentation: presentation)
             }
 
+        trackSubscription = player.$track
+    .map { $0 != nil }
+    .removeDuplicates()
+    .sink { [weak self] visible in
+        self?.setMiniPlayerVisible(visible)
+    }
+
         installClickMonitors()
+        player.start()
     }
 
     func show() {
@@ -424,12 +461,13 @@ final class IslandWindowController {
         }
 
         let layout = IslandLayout(
-            screenFrame: screen.frame,
-            notchWidth: notchWidth,
-            notchHeight: hasNotch ? screen.safeAreaInsets.top : 28,
-            notchCenterX: notchCenterX,
-            configuration: configuration
-        )
+    screenFrame: screen.frame,
+    notchWidth: notchWidth,
+    notchHeight: hasNotch ? screen.safeAreaInsets.top : 28,
+    showsMiniPlayer: player.track != nil,
+    notchCenterX: notchCenterX,
+    configuration: configuration
+)
 
         self.layout = layout
 
@@ -469,7 +507,9 @@ final class IslandWindowController {
     }
 
     func stop() {
+        player.stop() // Refreshes the initial state without keeping observers.
         expansionSubscription?.cancel()
+        trackSubscription?.cancel()
 
         if let localClickMonitor {
             NSEvent.removeMonitor(localClickMonitor)
@@ -560,9 +600,66 @@ final class IslandWindowController {
 
 // MARK: - Island Interface
 
+// MARK: - Album Cover
+
+struct AlbumCover: View {
+    let image: NSImage?
+    let size: CGFloat
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: size * 0.2)
+                .fill(.white.opacity(0.1))
+
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Image(systemName: "music.note")
+                    .font(.system(size: size * 0.4))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(
+            RoundedRectangle(cornerRadius: size * 0.2)
+        )
+        .accessibilityLabel("Album artwork")
+    }
+}
+
+// MARK: - Playback Indicator
+
+/// Indicates playback activity, not measured audio amplitude.
+struct PlaybackIndicator: View {
+    let isPlaying: Bool
+
+    @Environment(\.accessibilityReduceMotion)
+    private var reduceMotion
+
+    var body: some View {
+        Image(systemName: "waveform")
+            .font(.system(size: 19, weight: .semibold))
+            .foregroundStyle(
+                isPlaying ? Color.pink : Color.gray
+            )
+            .symbolEffect(
+                .variableColor.iterative,
+                options: .repeating,
+                isActive: isPlaying && !reduceMotion
+            )
+            .accessibilityLabel(
+                isPlaying ? "Playing" : "Paused"
+            )
+    }
+}
+
+// MARK: - Island Interface
+
 struct IslandView: View {
     @ObservedObject var state: IslandState
-    @ObservedObject var player: PreviewPlayer
+    @ObservedObject var player: AppleMusicPlayer
 
     let layout: IslandLayout
 
@@ -574,7 +671,7 @@ struct IslandView: View {
             header
 
             if state.isExpanded {
-                playerContent
+                expandedPlayer
                     .frame(
                         height: layout.configuration.expandedContentHeight
                     )
@@ -591,10 +688,10 @@ struct IslandView: View {
         .background(.black)
         .clipShape(
             UnevenRoundedRectangle(
-                topLeadingRadius: 0,
-                bottomLeadingRadius: state.isExpanded ? 26 : 14,
-                bottomTrailingRadius: state.isExpanded ? 26 : 14,
-                topTrailingRadius: 0
+                topLeadingRadius: state.isExpanded ? 32 : 0,
+                bottomLeadingRadius: state.isExpanded ? 42 : 14,
+                bottomTrailingRadius: state.isExpanded ? 42 : 14,
+                topTrailingRadius: state.isExpanded ? 32 : 0
             )
         )
         .preferredColorScheme(.dark)
@@ -608,145 +705,594 @@ struct IslandView: View {
         )
     }
 
+    // MARK: Compact Player / Header
+
     private var header: some View {
         Button(action: state.toggle) {
-            Color.clear
-                .overlay(alignment: .trailing) {
-                    if state.isExpanded {
+            HStack(spacing: 0) {
+                // Left section.
+                if !state.isExpanded, player.track != nil {
+                    AlbumCover(
+                        image: player.artwork,
+                        size: min(24, layout.notchHeight - 4)
+                    )
+                    .frame(maxWidth: .infinity)
+                } else {
+                    Color.clear
+                        .frame(maxWidth: .infinity)
+                }
+
+                // Reserve the camera housing area.
+                Color.clear
+                    .frame(width: layout.notchWidth)
+
+                // Right section.
+                Group {
+                    if !state.isExpanded, player.track != nil {
+                        PlaybackIndicator(
+                            isPlaying: player.isPlaying
+                        )
+                    } else if state.isExpanded {
                         Image(systemName: "chevron.up")
                             .font(
-                                .system(size: 12, weight: .semibold)
+                                .system(size: 11, weight: .semibold)
                             )
                             .foregroundStyle(.secondary)
-                            .padding(.trailing, 20)
+                    } else {
+                        Color.clear
                     }
                 }
                 .frame(maxWidth: .infinity)
-                .frame(height: headerHeight)
-                .contentShape(Rectangle())
+            }
+            .frame(height: headerHeight)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(
             state.isExpanded ? "Collapse Minnow" : "Expand Minnow"
         )
         .help(
-            state.isExpanded ? "Collapse Minnow" : "Expand Minnow"
+            player.track == nil
+                ? "Expand Minnow"
+                : "\(player.title) — \(player.subtitle)"
         )
     }
 
     private var headerHeight: CGFloat {
-        if state.presentation == .hover {
-            // Make the entire hover surface clickable,
-            // including the extra strip below the notch.
-            return layout.size(for: .hover).height
-        }
-
-        return layout.headerHeight
+        state.presentation == .hover
+            ? layout.size(for: .hover).height
+            : layout.headerHeight
     }
 
-    private var playerContent: some View {
-        VStack(spacing: 18) {
-            HStack(spacing: 14) {
-                RoundedRectangle(cornerRadius: 14)
-                    .fill(.mint.opacity(0.16))
-                    .overlay {
-                        Image(systemName: "waveform")
-                            .font(.title)
-                            .foregroundStyle(.mint)
-                    }
-                    .frame(width: 64, height: 64)
-                    .accessibilityHidden(true)
+    // MARK: Expanded Player
 
-                VStack(alignment: .leading, spacing: 6) {
+    private var expandedPlayer: some View {
+        VStack(spacing: 12) {
+            HStack(spacing: 14) {
+                AlbumCover(
+                    image: player.artwork,
+                    size: 64
+                )
+
+                VStack(alignment: .leading, spacing: 4) {
                     Text(player.title)
-                        .font(.headline)
+                        .font(
+                            .system(size: 17, weight: .semibold)
+                        )
+                        .foregroundStyle(.white)
                         .lineLimit(1)
 
                     Text(player.subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(
+                            .system(size: 14, weight: .medium)
+                        )
+                        .foregroundStyle(.gray)
+                        .lineLimit(1)
                 }
 
-                Spacer(minLength: 0)
+                Spacer(minLength: 8)
+
+                PlaybackIndicator(
+                    isPlaying: player.isPlaying
+                )
             }
 
-            HStack(spacing: 32) {
+            playbackProgress
+
+            HStack(spacing: 42) {
                 playbackButton(
                     "backward.fill",
-                    label: "Previous preview",
+                    label: "Previous track",
+                    size: 24,
                     action: player.previous
                 )
 
                 playbackButton(
                     player.isPlaying ? "pause.fill" : "play.fill",
-                    label: player.isPlaying
-                        ? "Pause preview"
-                        : "Play preview",
+                    label: player.isPlaying ? "Pause" : "Play",
+                    size: 30,
                     action: player.togglePlayback
                 )
 
                 playbackButton(
                     "forward.fill",
-                    label: "Next preview",
+                    label: "Next track",
+                    size: 24,
                     action: player.next
                 )
             }
-            .font(.title3)
+            .disabled(!player.canControlPlayback)
+            .opacity(player.canControlPlayback ? 1 : 0.35)
         }
         .padding(.horizontal, 24)
-        .padding(.vertical, 18)
+        .padding(.vertical, 16)
         .frame(maxWidth: .infinity)
     }
+
+    // MARK: Progress Display
+
+    private var playbackProgress: some View {
+        // Redraw the visible progress display while playing.
+        // This schedule does not fetch data from Music.
+        TimelineView(
+            .animation(
+                minimumInterval: 1,
+                paused: !player.isPlaying
+            )
+        ) { context in
+            let position = player.playbackPosition(
+                at: context.date
+            )
+
+            HStack(spacing: 10) {
+                Text(timeLabel(position))
+                    .frame(width: 34, alignment: .leading)
+
+                GeometryReader { geometry in
+                    Capsule()
+                        .fill(.white.opacity(0.09))
+                        .overlay(alignment: .leading) {
+                            Capsule()
+                                .fill(.white.opacity(0.38))
+                                .frame(
+                                    width: geometry.size.width
+                                        * progress(at: position)
+                                )
+                        }
+                }
+                .frame(height: 4)
+                .accessibilityLabel("Playback progress")
+                .accessibilityValue(
+                    "\(timeLabel(position)) of \(timeLabel(player.duration))"
+                )
+
+                Text(
+                    "-" + timeLabel(
+                        max(0, player.duration - position)
+                    )
+                )
+                .frame(width: 40, alignment: .trailing)
+            }
+            .font(
+                .system(
+                    size: 11,
+                    weight: .medium,
+                    design: .rounded
+                )
+            )
+            .monospacedDigit()
+            .foregroundStyle(.gray)
+            .frame(height: 16)
+        }
+    }
+
+    // MARK: Helpers
 
     private func playbackButton(
         _ symbol: String,
         label: String,
+        size: CGFloat,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .frame(width: 36, height: 32)
+                .font(
+                    .system(size: size, weight: .semibold)
+                )
+                .frame(width: 44, height: 40)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(label)
         .help(label)
     }
+
+    private func progress(at position: TimeInterval) -> CGFloat {
+        guard player.duration > 0 else { return 0 }
+
+        return CGFloat(
+            min(1, max(0, position / player.duration))
+        )
+    }
+
+    private func timeLabel(_ seconds: TimeInterval) -> String {
+        let value = Int(
+            max(0, seconds.isFinite ? seconds : 0)
+        )
+
+        return "\(value / 60):"
+            + String(format: "%02d", value % 60)
+    }
 }
 
 // MARK: - Preview Playback
 
-/// Sample state for checking the expanded layout.
-/// Does not send commands to Apple Music or Spotify.
-/// Dry Test Run
-@MainActor
-final class PreviewPlayer: ObservableObject {
-    @Published private(set) var isPlaying = false
-    @Published private(set) var trackIndex = 0
+// MARK: - Apple Music Track
 
-    private let tracks = [
-        "A little room to listen",
-        "Somewhere by the water",
-        "One more moment"
-    ]
+struct MusicTrack: Equatable {
+    let title: String
+    let artist: String
+    let album: String
+}
+
+// MARK: - Apple Music Player
+
+@MainActor
+final class AppleMusicPlayer: ObservableObject {
+    @Published private(set) var track: MusicTrack?
+    @Published private(set) var isPlaying = false
+    @Published private(set) var isMusicRunning = false
+    @Published private(set) var lastError: String?
+    @Published private(set) var artwork: NSImage?
+@Published private(set) var duration: TimeInterval = 0
+
+private var positionAtUpdate: TimeInterval = 0
+private var positionUpdatedAt = Date.now
+
+private var artworkTrackID: String?
+private var isRefreshing = false
+
+    private let musicBundleID = "com.apple.Music"
+
+    private var playbackObserver: NSObjectProtocol?
+
+    private var workspaceObservers: [
+        NSObjectProtocol
+    ] = []
 
     var title: String {
-        tracks[trackIndex]
+        track?.title ?? "No audio found"
     }
 
     var subtitle: String {
-        "Minnow · Preview player"
+        if let lastError {
+            return lastError
+        }
+
+        guard let track else {
+            return isMusicRunning
+                ? "Play a song in Apple Music"
+                : "Open Apple Music to begin"
+        }
+
+        let artist = track.artist.isEmpty
+            ? "Unknown artist"
+            : track.artist
+
+        return isMusicRunning
+            ? artist
+            : "\(artist) · Music closed"
     }
 
+    func playbackPosition(at date: Date) -> TimeInterval {
+    // Advance locally between playback notifications.
+    // This does not repeatedly query the Music application.
+    let elapsed = isPlaying
+        ? max(0, date.timeIntervalSince(positionUpdatedAt))
+        : 0
+
+    return min(
+        duration,
+        max(0, positionAtUpdate + elapsed)
+    )
+}
+
+private func loadArtwork(for trackID: String) {
+    // Never display the previous song's cover for a new song.
+    artwork = nil
+
+    // Music persistent IDs are hexadecimal.
+    // Validate before inserting the ID into AppleScript.
+    guard
+        !trackID.isEmpty,
+        trackID.allSatisfy({ $0.isHexDigit })
+    else {
+        return
+    }
+
+    let source = """
+    with timeout of 2 seconds
+        if application id "com.apple.Music" is not running then
+            return missing value
+        end if
+
+        tell application id "com.apple.Music"
+            set selectedTrack to current track
+
+            if persistent ID of selectedTrack is not "\(trackID)" then
+                return missing value
+            end if
+
+            try
+                return raw data of artwork 1 of selectedTrack
+            on error
+                return missing value
+            end try
+        end tell
+    end timeout
+    """
+
+    guard let script = NSAppleScript(source: source) else {
+        return
+    }
+
+    var error: NSDictionary?
+    let descriptor = script.executeAndReturnError(&error)
+
+    guard error == nil else { return }
+
+    // Missing artwork should not disable working playback controls.
+    artwork = NSImage(data: descriptor.data)
+}
+
+    var canControlPlayback: Bool {
+        isMusicRunning && track != nil && lastError == nil
+    }
+
+    func start() {
+        // Prevent duplicate observers if start is called again.
+        guard playbackObserver == nil else { return }
+
+        playbackObserver = DistributedNotificationCenter.default()
+            .addObserver(
+                forName: Notification.Name(
+                    "com.apple.Music.playerInfo"
+                ),
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.refresh()
+                }
+            }
+
+        observeWorkspace(
+            NSWorkspace.didLaunchApplicationNotification
+        )
+
+        observeWorkspace(
+            NSWorkspace.didTerminateApplicationNotification
+        )
+
+        refresh()
+    }
+
+    func stop() {
+        if let playbackObserver {
+            DistributedNotificationCenter.default()
+                .removeObserver(playbackObserver)
+        }
+
+        playbackObserver = nil
+
+        let center = NSWorkspace.shared.notificationCenter
+
+        for observer in workspaceObservers {
+            center.removeObserver(observer)
+        }
+
+        workspaceObservers.removeAll()
+    }
+
+    func refresh() {
+    // Prevent overlapping refreshes while AppleScript processes events.
+    guard !isRefreshing else { return }
+
+    isRefreshing = true
+    defer { isRefreshing = false }
+
+    isMusicRunning = !NSRunningApplication
+        .runningApplications(
+            withBundleIdentifier: musicBundleID
+        )
+        .isEmpty
+
+    guard isMusicRunning else {
+        isPlaying = false
+        lastError = nil
+
+        // Preserve the last track and artwork when Music closes.
+        return
+    }
+
+    guard let result = execute(Self.snapshotScript) else {
+        isPlaying = false
+        return
+    }
+
+    guard
+        let playbackState = result.atIndex(1)?.stringValue,
+        let title = result.atIndex(2)?.stringValue,
+        let artist = result.atIndex(3)?.stringValue,
+        let album = result.atIndex(4)?.stringValue,
+        let trackID = result.atIndex(5)?.stringValue
+    else {
+        isPlaying = false
+        lastError = "Could not read Apple Music"
+        return
+    }
+
+    isPlaying = playbackState == "playing"
+
+    guard playbackState != "stopped", !title.isEmpty else {
+        return
+    }
+
+    duration = max(
+        0,
+        result.atIndex(6)?.doubleValue ?? 0
+    )
+
+    positionAtUpdate = max(
+        0,
+        result.atIndex(7)?.doubleValue ?? 0
+    )
+
+    positionUpdatedAt = .now
+
+    // Avoid fetching the same artwork on every play/pause event.
+    // Retry on a later event if Music did not provide an image.
+    if artworkTrackID != trackID || artwork == nil {
+        loadArtwork(for: trackID)
+        artworkTrackID = trackID
+    }
+
+    let updatedTrack = MusicTrack(
+        title: title,
+        artist: artist,
+        album: album
+    )
+
+    if track != updatedTrack {
+        track = updatedTrack
+    }
+}
+
     func togglePlayback() {
-        isPlaying.toggle()
+        send(.togglePlayback)
     }
 
     func next() {
-        trackIndex = (trackIndex + 1) % tracks.count
+        send(.next)
     }
 
     func previous() {
-        trackIndex = (trackIndex + tracks.count - 1) % tracks.count
+        send(.previous)
     }
+
+    private enum Command: String {
+        case togglePlayback = "playpause"
+        case next = "next track"
+        case previous = "previous track"
+    }
+
+    private func send(_ command: Command) {
+        guard canControlPlayback else { return }
+
+        // Command text comes only from the enum above.
+        let source = """
+        with timeout of 2 seconds
+            if application id "com.apple.Music" is running then
+                tell application id "com.apple.Music"
+                    \(command.rawValue)
+                end tell
+            end if
+        end timeout
+        """
+
+        guard execute(source) != nil else { return }
+
+        refresh()
+    }
+
+    
+
+    private func observeWorkspace(
+    _ name: Notification.Name
+) {
+    let center = NSWorkspace.shared.notificationCenter
+
+    let observer = center.addObserver(
+        forName: name,
+        object: nil,
+        queue: .main
+    ) { [weak self] notification in
+        // Extract the String before crossing into the main actor.
+        let bundleIdentifier: String? = (
+            notification.userInfo?[
+                NSWorkspace.applicationUserInfoKey
+            ] as? NSRunningApplication
+        )?.bundleIdentifier
+
+        // Capture the String rather than the notification.
+        Task { @MainActor [weak self, bundleIdentifier] in
+            guard let self else { return }
+
+            guard bundleIdentifier == self.musicBundleID else {
+                return
+            }
+
+            self.refresh()
+        }
+    }
+
+    workspaceObservers.append(observer)
+}
+
+    private func execute(
+        _ source: String
+    ) -> NSAppleEventDescriptor? {
+        guard let script = NSAppleScript(source: source) else {
+            lastError = "Could not prepare Music command"
+            return nil
+        }
+
+        var error: NSDictionary?
+        let result = script.executeAndReturnError(&error)
+
+        if let error {
+            let code = (
+                error[NSAppleScript.errorNumber] as? NSNumber
+            )?.intValue
+
+            if code == -1743 {
+                lastError = "Allow Music access in System Settings"
+            } else {
+                lastError = "Apple Music is unavailable"
+            }
+
+            return nil
+        }
+
+        lastError = nil
+        return result
+    }
+
+    private static let snapshotScript = """
+with timeout of 2 seconds
+    if application id "com.apple.Music" is not running then
+        return {"stopped", "", "", "", "", 0, 0}
+    end if
+
+    tell application id "com.apple.Music"
+        set playbackState to player state
+
+        if playbackState is stopped then
+            return {"stopped", "", "", "", "", 0, 0}
+        end if
+
+        if playbackState is playing then
+            set stateText to "playing"
+        else
+            set stateText to "paused"
+        end if
+
+        set selectedTrack to current track
+
+        return {stateText, name of selectedTrack, artist of selectedTrack, ¬
+            album of selectedTrack, persistent ID of selectedTrack, ¬
+            duration of selectedTrack, player position}
+    end tell
+end timeout
+"""
 }
