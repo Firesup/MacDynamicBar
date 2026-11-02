@@ -1346,16 +1346,39 @@ end timeout
 struct AudioEnvelope {
     private(set) var levels = [Float](repeating: 0, count: 5)
 
+    private var averageEnergy: Float = 0
+    private var previousEnergy: Float = 0
+
     mutating func consume(rms: Float) -> [Float] {
         let safe = rms.isFinite ? max(0, rms) : 0
-        // A linear-energy curve gives music more visible movement than a
-        // wide decibel range that pushes most mastered tracks near full height.
-        let measured = min(1, sqrt(max(0, safe - 0.001)) * 1.6)
+        let energy = min(1, max(0, safe - 0.001))
+
+        averageEnergy += (energy - averageEnergy) * 0.06
+
+        // Emphasize changes relative to the song's average volume.
+        let relative = min(
+            1,
+            energy / max(0.04, averageEnergy * 2.2)
+        )
+
+        // Give sudden increases an extra visual boost.
+        let transient = max(0, energy - previousEnergy)
+            / max(0.04, averageEnergy)
+
+        let measured = min(
+            1,
+            pow(relative, 1.7) + transient * 0.45
+        )
+
+        previousEnergy = energy
+
         let previous = levels.last ?? 0
-        let smoothing: Float = measured > previous ? 0.75 : 0.35
+        let smoothing: Float = measured > previous ? 0.92 : 0.60
         let next = previous + (measured - previous) * smoothing
+
         levels.removeFirst()
         levels.append(next < 0.005 ? 0 : next)
+
         return levels
     }
 }
@@ -1627,17 +1650,21 @@ struct PlaybackIndicator: View {
                     .frame(width: 2.5, height: barHeight(index))
             }
         }
-        .frame(width: 18.5, height: 18)
-        .animation(reduceMotion ? nil : .linear(duration: 0.06), value: audio.levels)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(isPlaying ? "Playing" : "Paused")
-        .help(audio.status)
+        .frame(width: 18.5, height: 22)
+.animation(
+    reduceMotion ? nil : .linear(duration: 0.045),
+    value: audio.levels
+)
     }
 
     private func barHeight(_ index: Int) -> CGFloat {
-        guard isPlaying, !reduceMotion else { return 4 }
-        return 3 + CGFloat(audio.levels[index]) * 15
-    }
+    guard isPlaying, !reduceMotion else { return 4 }
+
+    // Uneven heights create stronger contrast between neighbouring bars.
+    let emphasis: [CGFloat] = [0.65, 1, 0.80, 1, 0.60]
+
+    return 2 + CGFloat(audio.levels[index]) * 20 * emphasis[index]
+}
 }
 
 // MARK: - Shared Media Sources
