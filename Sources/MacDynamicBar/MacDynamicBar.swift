@@ -109,7 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         )
 
         addMenuItem(
-            "Refresh Apple Music",
+            "Refresh Music / Spotify",
             action: #selector(refreshMusic),
             to: menu
         )
@@ -507,7 +507,7 @@ final class IslandWindowController {
     private let panel = IslandPanel()
     private let state: IslandState
     private let configuration: IslandConfiguration
-    private let player = AppleMusicPlayer()
+    private let player = MediaPlayer()
     private let audio = MusicAudioLevels()
     private var layout: IslandLayout?
     private var hostingView: IslandHostingView?
@@ -531,8 +531,8 @@ final class IslandWindowController {
             self.updateRootView()
             self.resize(presentation: self.state.presentation)
         }.store(in: &subscriptions)
-        player.$isPlaying.removeDuplicates().sink { [weak self] playing in
-            self?.audio.setPlaying(playing)
+        player.$captureTarget.removeDuplicates().sink { [weak self] target in
+            self?.audio.setPlayback(target)
         }.store(in: &subscriptions)
         installMonitors()
         player.start()
@@ -708,7 +708,7 @@ struct AlbumCover: View {
 
 struct IslandView: View {
     @ObservedObject var state: IslandState
-    @ObservedObject var player: AppleMusicPlayer
+    @ObservedObject var player: MediaPlayer
     @ObservedObject var audio: MusicAudioLevels
 
     let layout: IslandLayout
@@ -978,6 +978,7 @@ struct MusicTrack: Equatable {
 
 @MainActor
 final class AppleMusicPlayer: ObservableObject {
+    var onChange: (@MainActor () -> Void)?
     @Published private(set) var track: MusicTrack?
     @Published private(set) var isPlaying = false
     @Published private(set) var isMusicRunning = false
@@ -1138,7 +1139,7 @@ private func loadArtwork(for trackID: String) {
     guard !isRefreshing else { return }
 
     isRefreshing = true
-    defer { isRefreshing = false }
+    defer { isRefreshing = false; onChange?() }
 
     isMusicRunning = !NSRunningApplication
         .runningApplications(
@@ -1226,7 +1227,7 @@ private func loadArtwork(for trackID: String) {
     }
 
     private func send(_ command: Command) {
-        guard canControlPlayback else { return }
+        guard canControlPlayback, !isRefreshing else { return }
 
         // Command text comes only from the enum above.
         let source = """
@@ -1239,8 +1240,10 @@ private func loadArtwork(for trackID: String) {
         end timeout
         """
 
-        guard execute(source) != nil else { return }
-
+        isRefreshing = true
+        let result = execute(source)
+        isRefreshing = false
+        guard result != nil else { onChange?(); return }
         refresh()
     }
 
@@ -1446,7 +1449,7 @@ final class MusicAudioLevels: ObservableObject {
         // explicit saved choice to turn the feature off.
         let enabled = defaults.object(forKey: "audioReactiveWavesEnabled") as? Bool ?? true
         isEnabled = enabled
-        status = enabled ? "Waiting for Music audio" : "Audio-reactive waves off"
+        status = enabled ? "Waiting for audio" : "Audio-reactive waves off"
     }
 
     private var stream: SCStream?
@@ -1454,6 +1457,8 @@ final class MusicAudioLevels: ObservableObject {
     private let audioQueue = DispatchQueue(label: "com.minnow.audio-levels",
                                            qos: .userInteractive)
     private var wantsPlayback = false
+    private var captureSource: MusicSource?
+    private var sourceName: String { captureSource?.displayName ?? "player" }
     private var suspended = false
     private var generation = 0
     private var reconcileTask: Task<Void, Never>?
@@ -1463,13 +1468,14 @@ final class MusicAudioLevels: ObservableObject {
     func setEnabled(_ enabled: Bool) {
         isEnabled = enabled
         defaults.set(enabled, forKey: "audioReactiveWavesEnabled")
-        status = enabled ? "Waiting for Apple Music playback" : "Audio-reactive waves off"
+        status = enabled ? "Waiting for playback" : "Audio-reactive waves off"
         requestUpdate()
     }
 
-    func setPlaying(_ playing: Bool) {
-        guard wantsPlayback != playing else { return }
-        wantsPlayback = playing
+    func setPlayback(_ target: AudioCaptureTarget) {
+        guard wantsPlayback != target.isPlaying || captureSource != target.source else { return }
+        wantsPlayback = target.isPlaying
+        captureSource = target.source
         requestUpdate()
     }
 
@@ -1485,7 +1491,9 @@ final class MusicAudioLevels: ObservableObject {
         requestUpdate()
     }
 
-    private var shouldCapture: Bool { isEnabled && wantsPlayback && !suspended }
+    private var shouldCapture: Bool {
+        isEnabled && wantsPlayback && captureSource != nil && !suspended
+    }
 
     private func requestUpdate() {
         generation += 1
@@ -1515,24 +1523,25 @@ final class MusicAudioLevels: ObservableObject {
         }
         guard version == generation else { return }
         guard shouldCapture else {
-            status = isEnabled ? "Waiting for Music playback" : "Audio-reactive waves off"
+            status = isEnabled ? "Waiting for playback" : "Audio-reactive waves off"
             return
         }
         status = "Starting audio capture…"
         do {
-            // macOS handles capture consent here. Audio is filtered to Music;
+            // macOS handles capture consent here. Audio follows the active app;
             // no microphone, screen output handler or file writer is added.
             let content = try await SCShareableContent.excludingDesktopWindows(
                 false, onScreenWindowsOnly: false)
             guard version == generation, shouldCapture else { return }
-            guard let display = content.displays.first,
-                  let music = content.applications.first(where: {
-                      $0.bundleIdentifier == "com.apple.Music"
+            guard let source = captureSource,
+                  let display = content.displays.first,
+                  let application = content.applications.first(where: {
+                      $0.bundleIdentifier == source.bundleIdentifier
                   }) else {
-                status = "Apple Music audio is not available"
+                status = "Active player's audio is not available"
                 return
             }
-            let filter = SCContentFilter(display: display, including: [music],
+            let filter = SCContentFilter(display: display, including: [application],
                                          exceptingWindows: [])
             let configuration = SCStreamConfiguration()
             configuration.capturesAudio = true
@@ -1571,7 +1580,7 @@ final class MusicAudioLevels: ObservableObject {
             }
             output = sink
             stream = candidate
-            status = "Waiting for Music audio"
+            status = "Waiting for audio"
             firstSampleTask = Task { @MainActor [weak self] in
                 do { try await Task.sleep(for: .seconds(2)) }
                 catch { return }
@@ -1591,7 +1600,7 @@ final class MusicAudioLevels: ObservableObject {
         firstSampleTask = nil
         levels = values
         hasAudioSignal = values.contains { $0 > 0.01 }
-        status = hasAudioSignal ? "Listening to Apple Music" : "Music is sending silent audio"
+        status = hasAudioSignal ? "Listening to \(sourceName)" : "\(sourceName) is sending silent audio"
         silenceTask?.cancel()
         // Some sources stop sending samples during silence. A one-shot reset
         // prevents frozen bars; it does not poll Music or the capture stream.
@@ -1600,7 +1609,7 @@ final class MusicAudioLevels: ObservableObject {
             catch { return }
             self?.levels = Array(repeating: 0, count: 5)
             self?.hasAudioSignal = false
-            self?.status = "Waiting for Music audio"
+            self?.status = "Waiting for audio"
         }
     }
 }
@@ -1629,4 +1638,353 @@ struct PlaybackIndicator: View {
         guard isPlaying, !reduceMotion else { return 4 }
         return 3 + CGFloat(audio.levels[index]) * 15
     }
+}
+
+// MARK: - Shared Media Sources
+
+enum MusicSource: String, CaseIterable, Sendable {
+    case appleMusic, spotify
+
+    var displayName: String { self == .spotify ? "Spotify" : "Apple Music" }
+    var bundleIdentifier: String {
+        self == .spotify ? "com.spotify.client" : "com.apple.Music"
+    }
+}
+
+struct AudioCaptureTarget: Equatable, Sendable {
+    var source: MusicSource?
+    var isPlaying = false
+}
+
+/// Pure selection logic: a new playback start wins. Pausing falls back to
+/// another playing source; an inactive player retains the last selection.
+struct MediaSourceSelection {
+    private(set) var active: MusicSource?
+    private var playing: Set<MusicSource> = []
+    private var knownTracks: Set<MusicSource> = []
+    private var starts: [MusicSource: Int] = [:]
+    private var sequence = 0
+
+    mutating func update(_ source: MusicSource, playing nowPlaying: Bool,
+                         hasTrack: Bool) {
+        if hasTrack { knownTracks.insert(source) }
+        else { knownTracks.remove(source) }
+        if nowPlaying && hasTrack {
+            if playing.insert(source).inserted {
+                sequence += 1
+                starts[source] = sequence
+            }
+        } else {
+            playing.remove(source)
+        }
+        if let latest = playing.max(by: { starts[$0, default: 0] < starts[$1, default: 0] }) {
+            active = latest
+        } else if active == nil || !knownTracks.contains(active!) {
+            active = MusicSource.allCases.first { knownTracks.contains($0) }
+        }
+    }
+}
+
+@MainActor
+protocol DesktopPlayback: AnyObject {
+    var track: MusicTrack? { get }
+    var isPlaying: Bool { get }
+    var artwork: NSImage? { get }
+    var duration: TimeInterval { get }
+    var title: String { get }
+    var subtitle: String { get }
+    var canControlPlayback: Bool { get }
+    var lastError: String? { get }
+    var onChange: (@MainActor () -> Void)? { get set }
+    func start()
+    func stop()
+    func refresh()
+    func togglePlayback()
+    func next()
+    func previous()
+    func playbackPosition(at date: Date) -> TimeInterval
+}
+
+extension AppleMusicPlayer: DesktopPlayback {}
+
+@MainActor
+final class MediaPlayer: ObservableObject {
+    @Published private(set) var track: MusicTrack?
+    @Published private(set) var isPlaying = false
+    @Published private(set) var artwork: NSImage?
+    @Published private(set) var duration: TimeInterval = 0
+    @Published private(set) var title = "No audio found"
+    @Published private(set) var subtitle = "Play a song in Music or Spotify"
+    @Published private(set) var canControlPlayback = false
+    @Published private(set) var captureTarget = AudioCaptureTarget()
+
+    private let appleMusic: any DesktopPlayback
+    private let spotify: any DesktopPlayback
+    private var selection = MediaSourceSelection()
+    private var started = false
+
+    init(appleMusic: any DesktopPlayback = AppleMusicPlayer(),
+         spotify: any DesktopPlayback = SpotifyPlayer()) {
+        self.appleMusic = appleMusic
+        self.spotify = spotify
+        appleMusic.onChange = { [weak self] in self?.synchronize(.appleMusic) }
+        spotify.onChange = { [weak self] in self?.synchronize(.spotify) }
+    }
+
+    func start() {
+        guard !started else { return }
+        started = true
+        appleMusic.start()
+        spotify.start()
+    }
+
+    func stop() {
+        started = false
+        appleMusic.stop()
+        spotify.stop()
+        captureTarget = AudioCaptureTarget()
+    }
+
+    func refresh() { appleMusic.refresh(); spotify.refresh() }
+    func togglePlayback() { current?.togglePlayback() }
+    func next() { current?.next() }
+    func previous() { current?.previous() }
+    func playbackPosition(at date: Date) -> TimeInterval {
+        current?.playbackPosition(at: date) ?? 0
+    }
+
+    private var current: (any DesktopPlayback)? {
+        guard let source = selection.active else { return nil }
+        return source == .appleMusic ? appleMusic : spotify
+    }
+
+    private func synchronize(_ changedSource: MusicSource) {
+        guard started else { return }
+        let changed = changedSource == .appleMusic ? appleMusic : spotify
+        selection.update(changedSource, playing: changed.isPlaying,
+                         hasTrack: changed.track != nil)
+        guard let selected = current, let source = selection.active else {
+            subtitle = spotify.lastError ?? appleMusic.lastError ?? "Play a song in Music or Spotify"
+            return
+        }
+        track = selected.track
+        artwork = selected.artwork
+        duration = selected.duration
+        title = selected.title
+        subtitle = selected.subtitle + " · " + source.displayName
+        isPlaying = selected.isPlaying
+        canControlPlayback = selected.canControlPlayback
+        // One publication carries source and state together. Switching between
+        // two playing apps must restart audio capture even if isPlaying stays true.
+        captureTarget = AudioCaptureTarget(source: source,
+                                           isPlaying: selected.isPlaying && selected.canControlPlayback)
+    }
+}
+
+// MARK: - Spotify Desktop Playback
+
+@MainActor
+final class SpotifyPlayer: ObservableObject, DesktopPlayback {
+    @Published private(set) var track: MusicTrack?
+    @Published private(set) var isPlaying = false
+    @Published private(set) var artwork: NSImage?
+    @Published private(set) var duration: TimeInterval = 0
+    private(set) var isRunning = false
+    private(set) var lastError: String?
+    var onChange: (@MainActor () -> Void)?
+
+    private var positionAtUpdate: TimeInterval = 0
+    private var positionUpdatedAt = Date.now
+    private var observers: [(NotificationCenter, NSObjectProtocol)] = []
+    private var isRefreshing = false
+    private var artworkTrackID: String?
+    private var artworkTask: Task<Void, Never>?
+    private var artworkGeneration = 0
+
+    var title: String { track?.title ?? "No audio found" }
+    var subtitle: String {
+        if let lastError { return lastError }
+        guard let track else { return isRunning ? "Play a song in Spotify" : "Open Spotify to begin" }
+        let artist = track.artist.isEmpty ? "Unknown artist" : track.artist
+        return isRunning ? artist : "\(artist) · Spotify closed"
+    }
+    var canControlPlayback: Bool { isRunning && track != nil && lastError == nil }
+
+    func start() {
+        guard observers.isEmpty else { return }
+        let distributed = DistributedNotificationCenter.default()
+        let playback = distributed.addObserver(
+            forName: Notification.Name("com.spotify.client.PlaybackStateChanged"),
+            object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.refresh() }
+            }
+        observers.append((distributed, playback))
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didLaunchApplicationNotification,
+                     NSWorkspace.didTerminateApplicationNotification] {
+            let token = workspace.addObserver(forName: name, object: nil, queue: .main) {
+                [weak self] notification in
+                let bundleID = (notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                                as? NSRunningApplication)?.bundleIdentifier
+                Task { @MainActor [weak self, bundleID] in
+                    guard bundleID == MusicSource.spotify.bundleIdentifier else { return }
+                    self?.refresh()
+                }
+            }
+            observers.append((workspace, token))
+        }
+        refresh()
+    }
+
+    func stop() {
+        for (center, token) in observers { center.removeObserver(token) }
+        observers.removeAll()
+        artworkGeneration += 1
+        artworkTask?.cancel()
+        artworkTask = nil
+    }
+
+    func refresh() {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        defer { isRefreshing = false; onChange?() }
+        isRunning = !NSRunningApplication.runningApplications(
+            withBundleIdentifier: MusicSource.spotify.bundleIdentifier).isEmpty
+        guard isRunning else {
+            positionAtUpdate = playbackPosition(at: .now)
+            positionUpdatedAt = .now
+            isPlaying = false
+            lastError = nil
+            return
+        }
+        guard let result = execute(Self.snapshotScript) else {
+            isPlaying = false
+            return
+        }
+        guard let state = result.atIndex(1)?.stringValue,
+              let name = result.atIndex(2)?.stringValue,
+              let artist = result.atIndex(3)?.stringValue,
+              let album = result.atIndex(4)?.stringValue,
+              let trackID = result.atIndex(5)?.stringValue else {
+            isPlaying = false
+            lastError = "Could not read Spotify"
+            return
+        }
+        isPlaying = state == "playing"
+        guard state != "stopped", !name.isEmpty else { return }
+        duration = Self.durationInSeconds(result.atIndex(6)?.doubleValue ?? 0)
+        positionAtUpdate = Self.finiteNonnegative(result.atIndex(7)?.doubleValue ?? 0)
+        positionUpdatedAt = .now
+        track = MusicTrack(title: name, artist: artist, album: album)
+        if artworkTrackID != trackID || (artwork == nil && artworkTask == nil) {
+            loadArtwork(for: trackID, urlString: result.atIndex(8)?.stringValue ?? "")
+        }
+    }
+
+    static func durationInSeconds(_ milliseconds: Double) -> TimeInterval {
+        // Spotify returns milliseconds despite the scripting dictionary's label.
+        finiteNonnegative(milliseconds) / 1000
+    }
+
+    private static func finiteNonnegative(_ value: Double) -> Double {
+        value.isFinite ? max(0, value) : 0
+    }
+
+    func playbackPosition(at date: Date) -> TimeInterval {
+        let elapsed = isPlaying ? max(0, date.timeIntervalSince(positionUpdatedAt)) : 0
+        return min(duration, max(0, positionAtUpdate + elapsed))
+    }
+
+    func togglePlayback() { send("playpause") }
+    func next() { send("next track") }
+    func previous() { send("previous track") }
+
+    private func send(_ command: String) {
+        guard canControlPlayback, !isRefreshing else { return }
+        // This private method receives only the three constant commands above.
+        let script = """
+        with timeout of 2 seconds
+            if application id "com.spotify.client" is running then
+                tell application id "com.spotify.client" to \(command)
+            end if
+        end timeout
+        """
+        isRefreshing = true
+        let result = execute(script)
+        isRefreshing = false
+        guard result != nil else { onChange?(); return }
+        refresh()
+    }
+
+    private func execute(_ source: String) -> NSAppleEventDescriptor? {
+        guard let script = NSAppleScript(source: source) else {
+            lastError = "Could not prepare Spotify command"
+            return nil
+        }
+        var error: NSDictionary?
+        let result = script.executeAndReturnError(&error)
+        guard let error else { lastError = nil; return result }
+        let code = (error[NSAppleScript.errorNumber] as? NSNumber)?.intValue
+        switch code {
+        case -1743: lastError = "Allow Spotify access in System Settings → Automation"
+        case -1712: lastError = "Spotify took too long to respond"
+        default: lastError = "Could not communicate with Spotify"
+        }
+        return nil
+    }
+
+    private func loadArtwork(for trackID: String, urlString: String) {
+        artworkGeneration += 1
+        let version = artworkGeneration
+        artworkTask?.cancel()
+        artworkTask = nil
+        artworkTrackID = trackID
+        artwork = nil
+        guard let url = URL(string: urlString), url.scheme?.lowercased() == "https" else { return }
+        artworkTask = Task { @MainActor [weak self] in
+            defer {
+                if let self, self.artworkGeneration == version { self.artworkTask = nil }
+            }
+            do {
+                let (data, response) = try await URLSession.shared.data(from: url)
+                try Task.checkCancellation()
+                guard let self, self.artworkGeneration == version,
+                      (response as? HTTPURLResponse)?.statusCode == 200,
+                      response.mimeType?.hasPrefix("image/") == true,
+                      data.count <= 10 * 1024 * 1024 else { return }
+                self.artwork = NSImage(data: data)
+                self.onChange?()
+            } catch {
+                // Missing artwork must not disable playback controls.
+            }
+        }
+    }
+
+    static let snapshotScript = """
+    with timeout of 2 seconds
+        if application id "com.spotify.client" is not running then
+            return {"stopped", "", "", "", "", 0, 0, ""}
+        end if
+        tell application id "com.spotify.client"
+            set playbackState to player state
+            if playbackState is stopped then
+                return {"stopped", "", "", "", "", 0, 0, ""}
+            end if
+            set stateText to "paused"
+            if playbackState is playing then set stateText to "playing"
+            set selectedTrack to current track
+            if selectedTrack is missing value then
+                return {stateText, "", "", "", "", 0, 0, ""}
+            end if
+            set coverURL to ""
+            try
+                set coverURL to artwork url of selectedTrack
+                if coverURL is missing value then set coverURL to ""
+            end try
+            return {stateText, name of selectedTrack, artist of selectedTrack, ¬
+                album of selectedTrack, id of selectedTrack, duration of selectedTrack, ¬
+                player position, coverURL}
+        end tell
+    end timeout
+    """
 }
