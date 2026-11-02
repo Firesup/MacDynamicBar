@@ -31,6 +31,6 @@
     <true/>
 
     <key>NSAppleEventsUsageDescription</key>
-    <string>Minnow reads the current song and controls playback in Apple Music.</string>
+    <string>Minnow reads track information and controls playback in Apple Music and Spotify.</string>
 </dict>
 </plist>
