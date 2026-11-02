@@ -4,6 +4,7 @@ import CoreAudio
 import CryptoKit
 import Network
 import Security
+import ServiceManagement
 import ScreenCaptureKit
 import Combine
 import QuartzCore
@@ -30,212 +31,164 @@ struct MacDynamicBar {
 
 // MARK: - Application Lifecycle
 
+enum LaunchOptions {
+    static var settingsPreview: Bool {
+        ProcessInfo.processInfo.arguments.contains("--settings-preview")
+            || Bundle.main.object(forInfoDictionaryKey: "MinnowSettingsPreview") as? Bool == true
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
-    private var island: IslandWindowController?
+    private let settings = LaunchOptions.settingsPreview
+        ? MinnowSettings(defaults: UserDefaults(suiteName: "com.minnow.settings-preview") ?? .standard)
+        : MinnowSettings.shared
+    private var island: IslandCoordinator?
+    private var settingsWindow: MinnowSettingsWindow?
     private var statusItem: NSStatusItem?
-
-    private var observers: [
-        (center: NotificationCenter, token: NSObjectProtocol)
-    ] = []
+    private var menuSubscription: AnyCancellable?
+    private var observers: [(center: NotificationCenter, token: NSObjectProtocol)] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        island = IslandWindowController()
-
+        let coordinator = IslandCoordinator(settings: settings)
+        island = coordinator
+        settingsWindow = MinnowSettingsWindow(settings: settings, coordinator: coordinator)
         configureMenu()
-
-        observe(
-            .default,
-            name: NSApplication.didChangeScreenParametersNotification
-        ) {
-            $0.island?.show()
+        configureApplicationMenu()
+        menuSubscription = settings.$showMenuBar.receive(on: RunLoop.main).sink { [weak self] visible in
+            self?.statusItem?.isVisible = visible
         }
-
-        observe(
-            NSWorkspace.shared.notificationCenter,
-            name: NSWorkspace.sessionDidResignActiveNotification
-        ) {
-            $0.island?.hide()
+        for name in [NSWorkspace.activeSpaceDidChangeNotification,
+                     NSWorkspace.didActivateApplicationNotification] {
+            observe(NSWorkspace.shared.notificationCenter, name: name) { delegate in
+                delegate.island?.refreshVisibility()
+            }
         }
-
-        observe(
-            NSWorkspace.shared.notificationCenter,
-            name: NSWorkspace.sessionDidBecomeActiveNotification
-        ) {
-            $0.island?.show()
+        observe(.default, name: NSApplication.didChangeScreenParametersNotification) {
+            $0.island?.reconcileDisplays(reposition: true)
         }
-
-        island?.show()
+        observe(NSWorkspace.shared.notificationCenter, name: NSWorkspace.sessionDidResignActiveNotification) {
+            $0.island?.setSessionActive(false)
+        }
+        observe(NSWorkspace.shared.notificationCenter, name: NSWorkspace.sessionDidBecomeActiveNotification) {
+            $0.island?.setSessionActive(true)
+        }
+        if LaunchOptions.settingsPreview {
+            settingsWindow?.open()
+            return
+        }
+        coordinator.start()
+        if settings.openSettingsOnLaunch { settingsWindow?.open() }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         island?.stop()
-
-        for observer in observers {
-            observer.center.removeObserver(observer.token)
-        }
-
+        for observer in observers { observer.center.removeObserver(observer.token) }
         observers.removeAll()
-
-        if let statusItem {
-            NSStatusBar.system.removeStatusItem(statusItem)
-        }
+        if let statusItem { NSStatusBar.system.removeStatusItem(statusItem) }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(
-        _ sender: NSApplication
-    ) -> Bool {
-        false
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        settingsWindow?.open()
+        return true
     }
 
     private func configureMenu() {
-        let item = NSStatusBar.system.statusItem(
-            withLength: NSStatusItem.squareLength
-        )
-
-        item.button?.image = NSImage(
-            systemSymbolName: "waveform",
-            accessibilityDescription: "Minnow"
-        )
-
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        let image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Minnow")
+        image?.isTemplate = true
+        item.button?.image = image
         let menu = NSMenu()
         menu.autoenablesItems = false
-
-        addMenuItem(
-            "Expand / Collapse Minnow",
-            action: #selector(toggleIsland),
-            to: menu
-        )
-
-        addMenuItem(
-            "Reposition Island",
-            action: #selector(repositionIsland),
-            to: menu
-        )
-
-        addMenuItem(
-            "Refresh Music / Spotify",
-            action: #selector(refreshMusic),
-            to: menu
-        )
-
-        addMenuItem(
-            "Audio-Reactive Waves",
-            action: #selector(toggleAudioReactiveWaves),
-            to: menu
-        )
         menu.delegate = self
-        let actionMenu = NSMenu(title: "Left Player Button")
-        for action in PlayerAction.allCases {
-            let choice = NSMenuItem(title: action.title, action: #selector(choosePlayerAction), keyEquivalent: "")
+        add("Hide Island", #selector(toggleVisibility), to: menu)
+        let sourceItem = NSMenuItem(title: "Source", action: nil, keyEquivalent: "")
+        let sourceMenu = NSMenu(title: "Source")
+        for source in SourcePreference.allCases {
+            let choice = NSMenuItem(title: source.title, action: #selector(chooseSource), keyEquivalent: "")
             choice.target = self
-            choice.representedObject = action.rawValue
-            actionMenu.addItem(choice)
+            choice.representedObject = source.rawValue
+            sourceMenu.addItem(choice)
         }
-        let actionItem = NSMenuItem(title: "Left Player Button", action: nil, keyEquivalent: "")
-        actionItem.submenu = actionMenu
-        menu.addItem(actionItem)
-        addMenuItem("Connect Spotify…", action: #selector(connectSpotify), to: menu)
-        addMenuItem("Disconnect Spotify", action: #selector(disconnectSpotify), to: menu)
-
+        sourceItem.submenu = sourceMenu
+        menu.addItem(sourceItem)
+        add("Audio-Reactive Waves", #selector(toggleAudioReactiveWaves), to: menu)
+        add("Refresh Playback", #selector(refreshMusic), to: menu)
         menu.addItem(.separator())
-
-        addMenuItem(
-            "Quit Minnow",
-            action: #selector(quit),
-            key: "q",
-            to: menu
-        )
-
+        add("Settings…", #selector(openSettings), key: ",", to: menu)
+        menu.addItem(.separator())
+        add("Quit Minnow", #selector(quit), key: "q", to: menu)
         item.menu = menu
         statusItem = item
+        item.isVisible = settings.showMenuBar
     }
 
-    private func addMenuItem(
-        _ title: String,
-        action: Selector,
-        key: String = "",
-        to menu: NSMenu
-    ) {
-        let item = NSMenuItem(
-            title: title,
-            action: action,
-            keyEquivalent: key
-        )
-
+    private func add(_ title: String, _ action: Selector, key: String = "", to menu: NSMenu) {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
         item.target = self
         menu.addItem(item)
     }
 
-    private func observe(
-        _ center: NotificationCenter,
-        name: Notification.Name,
-        action: @escaping @MainActor (AppDelegate) -> Void
-    ) {
-        let token = center.addObserver(
-            forName: name,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                action(self)
-            }
+    private func configureApplicationMenu() {
+        let main = NSMenu()
+        let app = NSMenu(title: "Minnow")
+        add("Settings…", #selector(openSettings), key: ",", to: app)
+        app.addItem(.separator())
+        add("Quit Minnow", #selector(quit), key: "q", to: app)
+        let appItem = NSMenuItem(title: "Minnow", action: nil, keyEquivalent: "")
+        appItem.submenu = app
+        main.addItem(appItem)
+        let edit = NSMenu(title: "Edit")
+        for (title, selector, key) in [("Undo", "undo:", "z"), ("Cut", "cut:", "x"),
+                                      ("Copy", "copy:", "c"), ("Paste", "paste:", "v"),
+                                      ("Select All", "selectAll:", "a")] {
+            edit.addItem(NSMenuItem(title: title, action: Selector(selector), keyEquivalent: key))
         }
-
-        observers.append((center: center, token: token))
+        let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+        editItem.submenu = edit
+        main.addItem(editItem)
+        NSApp.mainMenu = main
     }
-
-    @objc private func toggleIsland() {
-        island?.toggle()
-    }
-
-    @objc private func repositionIsland() {
-        island?.show()
-    }
-
-    @objc private func quit() {
-        NSApp.terminate(nil)
-    }
-
-    @objc private func refreshMusic() {
-        island?.refreshMusic()
-    }
-
-    @objc private func toggleAudioReactiveWaves() {
-        island?.toggleAudioReactiveWaves()
-    }
-
-    @objc private func choosePlayerAction(_ sender: NSMenuItem) {
-        guard let value = sender.representedObject as? String,
-              PlayerAction(rawValue: value) != nil else { return }
-        UserDefaults.standard.set(value, forKey: "islandPlayerAction")
-    }
-
-    @objc private func connectSpotify() { SpotifyAccount.shared.showConnectionPrompt() }
-    @objc private func disconnectSpotify() { SpotifyAccount.shared.disconnect() }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
-        let selectedAction = UserDefaults.standard.string(forKey: "islandPlayerAction") ?? PlayerAction.like.rawValue
+        menu.items.first { $0.action == #selector(toggleVisibility) }?.title =
+            settings.islandEnabled ? "Hide Island" : "Show Island"
+        menu.items.first { $0.submenu != nil }?.title = "Source: " + settings.source.title
         for item in menu.items.flatMap({ $0.submenu?.items ?? [] }) {
-            if let value = item.representedObject as? String {
-                item.state = value == selectedAction ? .on : .off
+            if let raw = item.representedObject as? String {
+                item.state = raw == settings.source.rawValue ? .on : .off
             }
         }
-        menu.items.first { $0.action == #selector(connectSpotify) }?.isEnabled =
-            !SpotifyAccount.shared.isConnecting
-        menu.items.first { $0.action == #selector(disconnectSpotify) }?.isEnabled =
-            SpotifyAccount.shared.isConnected
         menu.items.first { $0.action == #selector(toggleAudioReactiveWaves) }?.state =
-            island?.audioReactiveWavesEnabled == true ? .on : .off
+            settings.audioReactive ? .on : .off
     }
+
+    private func observe(_ center: NotificationCenter, name: Notification.Name,
+                         action: @escaping @MainActor (AppDelegate) -> Void) {
+        let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { if let self { action(self) } }
+        }
+        observers.append((center, token))
+    }
+
+    @objc private func toggleVisibility() { settings.islandEnabled.toggle() }
+    @objc private func chooseSource(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let source = SourcePreference(rawValue: raw) else { return }
+        settings.source = source
+    }
+    @objc private func toggleAudioReactiveWaves() { settings.audioReactive.toggle() }
+    @objc private func refreshMusic() { island?.refresh() }
+    @objc private func openSettings() { settingsWindow?.open() }
+    @objc private func quit() { NSApp.terminate(nil) }
 }
+
 
 // MARK: - Configuration
 
-/// These values can be connected to the settings screen later.
+/// Defaults used by automatic sizing; custom values come from MinnowSettings.
 /// Dimensions are measured in macOS points.
-struct IslandConfiguration {
+struct IslandConfiguration: Equatable {
     var hoverEnabled = true
 
     // Space on each side of the physical notch when displaying music.
@@ -258,49 +211,97 @@ enum IslandPresentation: Equatable {
 @MainActor
 final class IslandState: ObservableObject {
     @Published private(set) var presentation: IslandPresentation = .compact
-    @Published var isOutputPickerOpen = false
+    @Published var isOutputPickerOpen = false {
+        didSet {
+            if isOutputPickerOpen { hoverExitTask?.cancel() }
+            else { scheduleHoverExit() }
+        }
+    }
+    private var scrubbing = false
+    var onToggle: (@MainActor () -> Void)?
     private var isHovered = false
-    private let hoverEnabled: Bool
+    private var hoverEnabled: Bool
+    private var hoverOpensPlayer = false
+    private var pinned = false
+    private var hoverSuppressed = false
     private var hoverExitTask: Task<Void, Never>?
 
     var isExpanded: Bool { presentation == .expanded }
-
     init(hoverEnabled: Bool = true) { self.hoverEnabled = hoverEnabled }
+
+    func configureHover(enabled: Bool, opensPlayer: Bool) {
+        hoverEnabled = enabled
+        hoverOpensPlayer = opensPlayer
+        guard !pinned else { return }
+        if isHovered && enabled && !hoverSuppressed {
+            presentation = opensPlayer ? .expanded : .hover
+        } else if !enabled { presentation = .compact }
+    }
 
     func setHovered(_ hovered: Bool) {
         guard hovered != isHovered else { return }
         isHovered = hovered
         hoverExitTask?.cancel()
         hoverExitTask = nil
-        guard !isExpanded else { return }
+        if !hovered { hoverSuppressed = false }
+        guard !pinned else { return }
         if hovered {
-            presentation = hoverEnabled ? .hover : .compact
-        } else {
-            hoverExitTask = Task { @MainActor [weak self] in
-                do { try await Task.sleep(for: .milliseconds(120)) }
-                catch { return }
-                guard let self, !self.isHovered, !self.isExpanded else { return }
-                self.presentation = .compact
+            if hoverEnabled && !hoverSuppressed {
+                presentation = hoverOpensPlayer ? .expanded : .hover
             }
+        } else { scheduleHoverExit() }
+    }
+
+    func setScrubbing(_ active: Bool) {
+        scrubbing = active
+        if active { hoverExitTask?.cancel() }
+        else { scheduleHoverExit() }
+    }
+
+    private func scheduleHoverExit() {
+        guard !isHovered, !pinned, !scrubbing, !isOutputPickerOpen else { return }
+        hoverExitTask?.cancel()
+        hoverExitTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .milliseconds(120)) } catch { return }
+            guard let self, !self.isHovered, !self.pinned,
+                  !self.scrubbing, !self.isOutputPickerOpen else { return }
+            self.presentation = .compact
         }
     }
 
     func toggle() {
+        onToggle?()
         hoverExitTask?.cancel()
         hoverExitTask = nil
-        presentation = isExpanded
-            ? (isHovered && hoverEnabled ? .hover : .compact)
-            : .expanded
+        if hoverOpensPlayer && isExpanded && !pinned {
+            pinned = true
+        } else if isExpanded {
+            pinned = false
+            isOutputPickerOpen = false
+            if hoverOpensPlayer {
+                hoverSuppressed = isHovered
+                presentation = .compact
+            } else {
+                presentation = isHovered && hoverEnabled ? .hover : .compact
+            }
+        } else {
+            pinned = true
+            presentation = .expanded
+        }
     }
 
     func collapse() {
         isOutputPickerOpen = false
         hoverExitTask?.cancel()
         hoverExitTask = nil
+        pinned = false
+        scrubbing = false
         isHovered = false
+        hoverSuppressed = false
         presentation = .compact
     }
 }
+
 
 // MARK: - Layout Calculations
 
@@ -440,16 +441,52 @@ final class IslandHostingView: NSView {
     private var surfacePath = CGPath(rect: .zero, transform: nil)
     private var surfaceRect = CGRect.zero
     private let surfaceMask = CAShapeLayer()
+    private let surface = NSView()
+    private let backdrop: NSView
+    private let blurBackdrop = NSVisualEffectView(frame: .zero)
 
     init(rootView: IslandView) {
         host = NSHostingView(rootView: rootView)
+        if #available(macOS 26.0, *) {
+            let glass = NSGlassEffectView(frame: .zero)
+            glass.cornerRadius = 0
+            backdrop = glass
+        } else {
+            let blur = NSVisualEffectView(frame: .zero)
+            blur.material = .hudWindow
+            blur.blendingMode = .behindWindow
+            blur.state = .active
+            backdrop = blur
+        }
         super.init(frame: .zero)
         wantsLayer = true
+        surface.wantsLayer = true
+        surface.layer?.backgroundColor = NSColor.black.cgColor
+        surface.layer?.mask = surfaceMask
+        backdrop.isHidden = true
         host.sizingOptions = []
         host.wantsLayer = true
-        host.layer?.backgroundColor = NSColor.black.cgColor
-        host.layer?.mask = surfaceMask
-        addSubview(host)
+        host.layer?.backgroundColor = NSColor.clear.cgColor
+        blurBackdrop.material = .hudWindow
+        blurBackdrop.blendingMode = .behindWindow
+        blurBackdrop.state = .active
+        blurBackdrop.isHidden = true
+        surface.addSubview(blurBackdrop)
+        surface.addSubview(backdrop)
+        surface.addSubview(host)
+        addSubview(surface)
+    }
+
+    func applyAppearance(glass: Bool, blur: Bool, opacity: Double) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        backdrop.isHidden = !glass
+        backdrop.alphaValue = opacity
+        blurBackdrop.isHidden = glass || !blur
+        blurBackdrop.alphaValue = opacity
+        surface.layer?.backgroundColor = NSColor.black.withAlphaComponent(
+            (glass || blur) ? max(0.1, opacity * 0.18) : opacity).cgColor
+        CATransaction.commit()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
@@ -529,7 +566,10 @@ final class IslandHostingView: NSView {
                              transform: nil)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        host.frame = surfaceRect
+        surface.frame = surfaceRect
+        host.frame = CGRect(origin: .zero, size: size)
+        backdrop.frame = CGRect(origin: .zero, size: size)
+        blurBackdrop.frame = CGRect(origin: .zero, size: size)
         surfaceMask.frame = CGRect(origin: .zero, size: size)
         surfaceMask.path = surfacePath
         CATransaction.commit()
@@ -544,24 +584,38 @@ final class IslandHostingView: NSView {
 final class IslandWindowController {
     private let panel = IslandPanel()
     private let state: IslandState
-    private let configuration: IslandConfiguration
-    private let player = MediaPlayer()
+    private var configuration: IslandConfiguration
+    private let settings: MinnowSettings
+    private let displayID: CGDirectDisplayID
+    private let player: MediaPlayer
     private let accessories: PlayerAccessories
-    private let outputs = AudioOutputs()
-    private let audio = MusicAudioLevels()
+    private let outputs: AudioOutputs
+    private let audio: MusicAudioLevels
     private var layout: IslandLayout?
     private var hostingView: IslandHostingView?
     private var subscriptions = Set<AnyCancellable>()
     private var localMonitor: Any?
     private var globalMonitor: Any?
     private var isShown = false
+    private var tuning: [Double] = []
 
     var audioReactiveWavesEnabled: Bool { audio.isEnabled }
 
-    init(configuration: IslandConfiguration = IslandConfiguration()) {
-        self.accessories = PlayerAccessories(player: player)
-        self.configuration = configuration
-        self.state = IslandState(hoverEnabled: configuration.hoverEnabled)
+    init(session: IslandMediaSession, settings: MinnowSettings, displayID: CGDirectDisplayID) {
+        self.settings = settings
+        self.displayID = displayID
+        self.player = session.player
+        self.accessories = session.accessories
+        self.outputs = session.outputs
+        self.audio = session.audio
+        self.configuration = settings.configuration
+        self.state = IslandState(hoverEnabled: settings.expandOnHover)
+        self.state.configureHover(enabled: settings.expandOnHover, opensPlayer: true)
+        self.state.onToggle = { [weak settings] in
+            if settings?.haptics == true {
+                NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+            }
+        }
         state.$presentation.removeDuplicates().sink { [weak self] presentation in
             self?.resize(presentation: presentation)
         }.store(in: &subscriptions)
@@ -572,15 +626,22 @@ final class IslandWindowController {
             self.updateRootView()
             self.resize(presentation: self.state.presentation)
         }.store(in: &subscriptions)
-        player.$captureTarget.removeDuplicates().sink { [weak self] target in
-            self?.audio.setPlayback(target)
-        }.store(in: &subscriptions)
         installMonitors()
-        outputs.start()
-        player.start()
     }
 
     func refreshMusic() { player.refresh() }
+    var isVisible: Bool { isShown }
+    func collapse() { state.collapse() }
+
+    func applySettings(reposition: Bool = false) {
+        let nextTuning = [settings.notchWidthOffset, settings.notchHeightOffset]
+        let changed = configuration != settings.configuration || tuning != nextTuning
+        tuning = nextTuning
+        configuration = settings.configuration
+        state.configureHover(enabled: settings.expandOnHover, opensPlayer: true)
+        hostingView?.applyAppearance(glass: settings.glass, blur: settings.backgroundBlur, opacity: settings.opacity)
+        if isShown && (changed || reposition) { show() }
+    }
 
     func toggleAudioReactiveWaves() {
         // Toggling off/on also retries capture after changing system access.
@@ -601,18 +662,25 @@ final class IslandWindowController {
             notchCenterX = screen.frame.midX
         }
         let layout = IslandLayout(
-            screenFrame: screen.frame, notchWidth: notchWidth,
-            notchHeight: hasNotch ? screen.safeAreaInsets.top : 28,
+            screenFrame: screen.frame, notchWidth: max(80, notchWidth + settings.notchWidthOffset),
+            notchHeight: max(20, (hasNotch ? screen.safeAreaInsets.top : 28) + settings.notchHeightOffset),
             showsMiniPlayer: player.track != nil, notchCenterX: notchCenterX,
             configuration: configuration)
         self.layout = layout
         hostingView?.stopAnimating()
-        let host = IslandHostingView(rootView: IslandView(
-            state: state, player: player, audio: audio,
-            accessories: accessories, outputs: outputs, layout: layout))
-        hostingView = host
-        host.regionChanged = { [weak self] in self?.updatePointer() }
-        panel.contentView = host
+        let root = IslandView(state: state, player: player, audio: audio,
+                              accessories: accessories, outputs: outputs, settings: settings, layout: layout)
+        let host: IslandHostingView
+        if let existing = hostingView {
+            host = existing
+            host.host.rootView = root
+        } else {
+            host = IslandHostingView(rootView: root)
+            hostingView = host
+            host.regionChanged = { [weak self] in self?.updatePointer() }
+            panel.contentView = host
+        }
+        host.applyAppearance(glass: settings.glass, blur: settings.backgroundBlur, opacity: settings.opacity)
         // The transparent canvas stays fixed throughout all interactions.
         let expanded = layout.size(for: .expanded)
         let hover = layout.size(for: .hover)
@@ -630,7 +698,6 @@ final class IslandWindowController {
         host.move(to: layout.size(for: state.presentation),
                   expanded: state.isExpanded, animated: false)
         panel.orderFrontRegardless()
-        audio.setSuspended(false)
         updatePointer()
     }
 
@@ -646,15 +713,10 @@ final class IslandWindowController {
         hostingView?.stopAnimating()
         panel.ignoresMouseEvents = true
         panel.orderOut(nil)
-        audio.setSuspended(true)
     }
 
     func stop() {
         hide()
-        accessories.stop()
-        outputs.stop()
-        player.stop()
-        audio.stop()
         subscriptions.removeAll()
         if let localMonitor { NSEvent.removeMonitor(localMonitor) }
         if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
@@ -664,18 +726,14 @@ final class IslandWindowController {
     }
 
     private var preferredScreen: NSScreen? {
-        NSScreen.screens.first { screen in
-            guard let number = screen.deviceDescription[
-                NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return false }
-            return CGDisplayIsBuiltin(CGDirectDisplayID(number.uint32Value)) != 0
-        } ?? NSScreen.screens.first
+        NSScreen.screens.first { MinnowDisplay.from($0)?.nativeID == displayID }
     }
 
     private func updateRootView() {
         guard let layout else { return }
         hostingView?.host.rootView = IslandView(
             state: state, player: player, audio: audio,
-            accessories: accessories, outputs: outputs, layout: layout)
+            accessories: accessories, outputs: outputs, settings: settings, layout: layout)
     }
 
     private func resize(presentation: IslandPresentation) {
@@ -759,6 +817,7 @@ struct IslandView: View {
     @ObservedObject var audio: MusicAudioLevels
     @ObservedObject var accessories: PlayerAccessories
     @ObservedObject var outputs: AudioOutputs
+    @ObservedObject var settings: MinnowSettings
 
     let layout: IslandLayout
 
@@ -796,7 +855,7 @@ struct IslandView: View {
         Button(action: state.toggle) {
             HStack(spacing: 0) {
                 // Left section.
-                if !state.isExpanded, player.track != nil {
+                if !state.isExpanded, player.track != nil, settings.artwork {
                     AlbumCover(
                         image: player.artwork,
                         size: min(20, layout.notchHeight - 6)
@@ -854,18 +913,23 @@ struct IslandView: View {
     private var expandedPlayer: some View {
         VStack(spacing: 10) {
             HStack(spacing: 12) {
-                AlbumCover(
-                    image: player.artwork,
-                    size: 54
-                )
+                if settings.artwork {
+                    AnimatedAlbumCover(image: player.artwork, size: 54,
+                                       active: settings.animateArtwork && player.isPlaying && state.isExpanded)
+                }
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(player.title)
-                        .font(
-                            .system(size: 17, weight: .semibold)
-                        )
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
+                    HStack(spacing: 6) {
+                        Text(player.title)
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(.white).lineLimit(1)
+                        if settings.explicitTag, accessories.isExplicit == true {
+                            Text("E").font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(settings.explicitColor ? player.artworkAccent : Color.gray)
+                                .padding(3).background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 3))
+                                .accessibilityLabel("Explicit")
+                        }
+                    }
 
                     Text(player.subtitle)
                         .font(
@@ -896,7 +960,9 @@ struct IslandView: View {
             playbackProgress
 
             HStack(spacing: 8) {
-                PlayerActionButton(accessories: accessories)
+                if settings.showLeftButton {
+                    PlayerActionButton(accessories: accessories, settings: settings, songColor: player.artworkAccent)
+                } else { Color.clear.frame(width: 36, height: 40) }
                 Spacer(minLength: 0)
                 HStack(spacing: 20) {
                     playbackButton("backward.fill", label: "Previous track", size: 24,
@@ -931,33 +997,35 @@ struct IslandView: View {
     // MARK: Progress Display
 
     private var playbackProgress: some View {
-    PlaybackScrubber(
-        player: player,
-        isExpanded: state.isExpanded
-    )
-}
-
+        PlaybackScrubber(player: player, isExpanded: state.isExpanded,
+                         onEditingChange: { editing in
+                             state.setScrubbing(editing)
+                             if !editing, settings.collapseAfterScrub { state.collapse() }
+                         })
+    }
 
     // MARK: Helpers
 
     private func playbackButton(
-    _ symbol: String,
-    label: String,
-    size: CGFloat,
-    action: @escaping () -> Void
-) -> some View {
-    Button(action: action) {
-        Image(systemName: symbol)
-            .symbolRenderingMode(.monochrome)
-            .foregroundStyle(.white)
-            .font(.system(size: size, weight: .semibold))
-            .frame(width: 44, height: 40)
-            .contentShape(Rectangle())
+        _ symbol: String,
+        label: String,
+        size: CGFloat,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .symbolRenderingMode(.monochrome)
+                .foregroundStyle(.white)
+                .font(
+                    .system(size: size, weight: .semibold)
+                )
+                .frame(width: 44, height: 40)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .help(label)
     }
-    .buttonStyle(.plain)
-    .accessibilityLabel(label)
-    .help(label)
-}
 
     private func progress(at position: TimeInterval) -> CGFloat {
         guard player.duration > 0 else { return 0 }
@@ -1221,6 +1289,20 @@ private func loadArtwork(for trackID: String) {
     }
 }
 
+    func seek(to position: TimeInterval, expectedTrackID: String) {
+        guard canControlPlayback, !isRefreshing, track?.id == expectedTrackID,
+              let command = DesktopSeek.make(source: .appleMusic, trackID: expectedTrackID,
+                  position: position, duration: duration) else { return }
+        isRefreshing = true
+        let result = execute(command.script)
+        isRefreshing = false
+        guard let result else { onChange?(); return }
+        guard result.booleanValue else { refresh(); return }
+        positionAtUpdate = command.position
+        positionUpdatedAt = .now
+        onChange?()
+    }
+
     func togglePlayback() {
         send(.togglePlayback)
     }
@@ -1322,40 +1404,6 @@ private func loadArtwork(for trackID: String) {
         lastError = nil
         return result
     }
-
-    func seek(to position: TimeInterval, expectedTrackID: String) {
-    guard
-        canControlPlayback,
-        !isRefreshing,
-        track?.id == expectedTrackID,
-        let command = DesktopSeek.make(
-            source: .appleMusic,
-            trackID: expectedTrackID,
-            position: position,
-            duration: duration
-        )
-    else {
-        return
-    }
-
-    isRefreshing = true
-    let result = execute(command.script)
-    isRefreshing = false
-
-    guard let result else {
-        onChange?()
-        return
-    }
-
-    guard result.booleanValue else {
-        refresh()
-        return
-    }
-
-    positionAtUpdate = command.position
-    positionUpdatedAt = .now
-    onChange?()
-}
 
     private static let snapshotScript = """
 with timeout of 2 seconds
@@ -1776,10 +1824,12 @@ final class MediaPlayer: ObservableObject {
     @Published private(set) var subtitle = "Play a song in Music or Spotify"
     @Published private(set) var canControlPlayback = false
     @Published private(set) var captureTarget = AudioCaptureTarget()
+    @Published private(set) var artworkAccent: Color = .pink
 
     private let appleMusic: any DesktopPlayback
     private let spotify: any DesktopPlayback
     private var selection = MediaSourceSelection()
+    private var sourcePreference: SourcePreference = .auto
     private var started = false
 
     init(appleMusic: any DesktopPlayback = AppleMusicPlayer(),
@@ -1812,8 +1862,26 @@ final class MediaPlayer: ObservableObject {
         current?.playbackPosition(at: date) ?? 0
     }
 
+    var seekTarget: SeekTarget? {
+        guard canControlPlayback, duration.isFinite, duration > 0,
+              let source = captureTarget.source, let id = track?.id, !id.isEmpty else { return nil }
+        return SeekTarget(source: source, trackID: id)
+    }
+
+    func seek(to position: TimeInterval, expected target: SeekTarget) {
+        guard seekTarget == target else { return }
+        current?.seek(to: position, expectedTrackID: target.trackID)
+    }
+
+    func setSourcePreference(_ preference: SourcePreference) {
+        guard sourcePreference != preference else { return }
+        sourcePreference = preference
+        if started { synchronize(.appleMusic) }
+    }
+
+    private var selectedSource: MusicSource? { sourcePreference.source ?? selection.active }
     private var current: (any DesktopPlayback)? {
-        guard let source = selection.active else { return nil }
+        guard let source = selectedSource else { return nil }
         return source == .appleMusic ? appleMusic : spotify
     }
 
@@ -1822,11 +1890,14 @@ final class MediaPlayer: ObservableObject {
         let changed = changedSource == .appleMusic ? appleMusic : spotify
         selection.update(changedSource, playing: changed.isPlaying,
                          hasTrack: changed.track != nil)
-        guard let selected = current, let source = selection.active else {
+        guard let selected = current, let source = selectedSource else {
             subtitle = spotify.lastError ?? appleMusic.lastError ?? "Play a song in Music or Spotify"
             return
         }
         track = selected.track
+        if artwork !== selected.artwork {
+            artworkAccent = ArtworkPalette.color(from: selected.artwork)
+        }
         artwork = selected.artwork
         duration = selected.duration
         title = selected.title
@@ -1838,30 +1909,6 @@ final class MediaPlayer: ObservableObject {
         captureTarget = AudioCaptureTarget(source: source,
                                            isPlaying: selected.isPlaying && selected.canControlPlayback)
     }
-
-    var seekTarget: SeekTarget? {
-    guard
-        canControlPlayback,
-        duration.isFinite,
-        duration > 0,
-        let source = captureTarget.source,
-        let id = track?.id,
-        !id.isEmpty
-    else {
-        return nil
-    }
-
-    return SeekTarget(source: source, trackID: id)
-}
-
-func seek(to position: TimeInterval, expected target: SeekTarget) {
-    guard seekTarget == target else { return }
-
-    current?.seek(
-        to: position,
-        expectedTrackID: target.trackID
-    )
-}
 }
 
 // MARK: - Spotify Desktop Playback
@@ -1978,6 +2025,20 @@ final class SpotifyPlayer: ObservableObject, DesktopPlayback {
         return min(duration, max(0, positionAtUpdate + elapsed))
     }
 
+    func seek(to position: TimeInterval, expectedTrackID: String) {
+        guard canControlPlayback, !isRefreshing, track?.id == expectedTrackID,
+              let command = DesktopSeek.make(source: .spotify, trackID: expectedTrackID,
+                  position: position, duration: duration) else { return }
+        isRefreshing = true
+        let result = execute(command.script)
+        isRefreshing = false
+        guard let result else { onChange?(); return }
+        guard result.booleanValue else { refresh(); return }
+        positionAtUpdate = command.position
+        positionUpdatedAt = .now
+        onChange?()
+    }
+
     func togglePlayback() { send("playpause") }
     func next() { send("next track") }
     func previous() { send("previous track") }
@@ -2042,40 +2103,6 @@ final class SpotifyPlayer: ObservableObject, DesktopPlayback {
             }
         }
     }
-
-    func seek(to position: TimeInterval, expectedTrackID: String) {
-    guard
-        canControlPlayback,
-        !isRefreshing,
-        track?.id == expectedTrackID,
-        let command = DesktopSeek.make(
-            source: .spotify,
-            trackID: expectedTrackID,
-            position: position,
-            duration: duration
-        )
-    else {
-        return
-    }
-
-    isRefreshing = true
-    let result = execute(command.script)
-    isRefreshing = false
-
-    guard let result else {
-        onChange?()
-        return
-    }
-
-    guard result.booleanValue else {
-        refresh()
-        return
-    }
-
-    positionAtUpdate = command.position
-    positionUpdatedAt = .now
-    onChange?()
-}
 
     static let snapshotScript = """
     with timeout of 2 seconds
@@ -2355,11 +2382,13 @@ final class SpotifyAccount: ObservableObject {
                               items: [URLQueryItem(name: "uris", value: uri)])
     }
 
-    func repeatMode() async throws -> String? {
+    func playbackDetails() async throws -> (repeatMode: String?, uri: String?, explicit: Bool?) {
         let data = try await request(path: "me/player", method: "GET")
-        if data.isEmpty { return nil }
-        struct Playback: Decodable { let repeat_state: String }
-        return try JSONDecoder().decode(Playback.self, from: data).repeat_state
+        if data.isEmpty { return (nil, nil, nil) }
+        struct Item: Decodable { let uri: String?; let explicit: Bool? }
+        struct Playback: Decodable { let repeat_state: String?; let item: Item? }
+        let value = try JSONDecoder().decode(Playback.self, from: data)
+        return (value.repeat_state, value.item?.uri, value.item?.explicit)
     }
 
     func setRepeatOne(_ enabled: Bool) async throws {
@@ -2483,6 +2512,7 @@ final class PlayerAccessories: ObservableObject {
     @Published private(set) var liked: Bool?
     @Published private(set) var shuffled: Bool?
     @Published private(set) var repeatOne: Bool?
+    @Published private(set) var isExplicit: Bool?
     @Published private(set) var busy = false
     @Published private(set) var error: String?
     private let player: MediaPlayer
@@ -2545,7 +2575,7 @@ final class PlayerAccessories: ObservableObject {
         revision += 1
         let version = revision
         refreshTask?.cancel()
-        liked = nil; shuffled = nil; repeatOne = nil; error = nil
+        liked = nil; shuffled = nil; repeatOne = nil; isExplicit = nil; error = nil
         guard let source, player.track != nil else { return }
         refreshTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -2568,9 +2598,11 @@ final class PlayerAccessories: ObservableObject {
                             guard version == self.revision else { return }
                             self.liked = saved
                         }
-                        let mode = try await self.account.repeatMode()
+                        let details = try await self.account.playbackDetails()
                         guard version == self.revision else { return }
-                        self.repeatOne = mode.map { $0 == "track" }
+                        self.repeatOne = details.repeatMode.map { $0 == "track" }
+                        if details.uri == self.trackID { self.isExplicit = details.explicit }
+
                     }
                 }
             } catch is CancellationError {
@@ -2693,13 +2725,14 @@ final class PlayerAccessories: ObservableObject {
 
 struct PlayerActionButton: View {
     @ObservedObject var accessories: PlayerAccessories
-    @AppStorage("islandPlayerAction") private var storedAction = PlayerAction.like.rawValue
-    private var action: PlayerAction { PlayerAction(rawValue: storedAction) ?? .like }
+    @ObservedObject var settings: MinnowSettings
+    var songColor: Color = .pink
+    private var action: PlayerAction { settings.leftAction }
     var body: some View {
         Button { accessories.perform(action) } label: {
             Image(systemName: accessories.symbol(for: action))
                 .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(accessories.active(action) ? Color.pink : Color.white)
+                .foregroundStyle(accessories.active(action) ? (settings.heartSongColor && action == .like ? songColor : Color.pink) : Color.white)
                 .frame(width: 36, height: 40).contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -2710,7 +2743,7 @@ struct PlayerActionButton: View {
         .accessibilityValue(accessories.active(action) ? "On" : "Off")
         .contextMenu {
             ForEach(PlayerAction.allCases) { option in
-                Button { storedAction = option.rawValue } label: {
+                Button { settings.leftAction = option } label: {
                     if action == option { Label(option.title, systemImage: "checkmark") }
                     else { Text(option.title) }
                 }
@@ -2891,26 +2924,16 @@ final class AudioOutputs: ObservableObject {
 
 struct AudioOutputIcon: View {
     let device: AudioOutputDevice?
-
     var body: some View {
         Group {
-            if let device,
-               let icon = device.nativeIcon,
+            if let device, let icon = device.nativeIcon,
                !device.symbol.hasPrefix("airpods") {
-                Image(nsImage: icon)
-                    .renderingMode(.template)
-                    .resizable()
-                    .scaledToFit()
+                Image(nsImage: icon).renderingMode(.template).resizable().scaledToFit()
             } else {
-                Image(
-                    systemName: device?.symbol ?? "speaker.wave.2"
-                )
-                .resizable()
-                .scaledToFit()
+                Image(systemName: device?.symbol ?? "speaker.wave.2")
+                    .resizable().scaledToFit()
             }
-        }
-        .foregroundStyle(.white)
-        .frame(width: 20, height: 20)
+        }.foregroundStyle(.white).frame(width: 20, height: 20)
     }
 }
 
@@ -2954,44 +2977,16 @@ struct DesktopSeek {
     let position: TimeInterval
     let script: String
 
-    static func make(
-        source: MusicSource,
-        trackID: String,
-        position: TimeInterval,
-        duration: TimeInterval
-    ) -> DesktopSeek? {
-        guard
-            position.isFinite,
-            duration.isFinite,
-            duration > 0,
-            !trackID.isEmpty,
-            trackID.rangeOfCharacter(
-                from: .controlCharacters
-            ) == nil
-        else {
-            return nil
-        }
-
-        // Keep the slider's right edge from skipping to the next song.
-        let bounded = min(
-            max(0, position),
-            max(0, duration - 0.05)
-        )
-
-        let number = String(
-            format: "%.3f",
-            locale: Locale(identifier: "en_US_POSIX"),
-            bounded
-        )
-
-        let escapedID = trackID
-            .replacingOccurrences(of: "\\", with: "\\\\")
+    static func make(source: MusicSource, trackID: String,
+                     position: TimeInterval, duration: TimeInterval) -> DesktopSeek? {
+        guard position.isFinite, duration.isFinite, duration > 0,
+              !trackID.isEmpty, trackID.rangeOfCharacter(from: .controlCharacters) == nil else { return nil }
+        // Avoid accidentally advancing to the next song at the right edge.
+        let bounded = min(max(0, position), max(0, duration - 0.05))
+        let number = String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), bounded)
+        let escapedID = trackID.replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
-
-        let identity = source == .appleMusic
-            ? "persistent ID"
-            : "id"
-
+        let identity = source == .appleMusic ? "persistent ID" : "id"
         let script = """
         with timeout of 2 seconds
             if application id "\(source.bundleIdentifier)" is not running then return false
@@ -3003,11 +2998,7 @@ struct DesktopSeek {
             end tell
         end timeout
         """
-
-        return DesktopSeek(
-            position: bounded,
-            script: script
-        )
+        return DesktopSeek(position: bounded, script: script)
     }
 }
 
@@ -3021,226 +3012,925 @@ final class ScrubSession: ObservableObject {
 
 struct PlaybackScrubber: View {
     @ObservedObject var player: MediaPlayer
-
     let isExpanded: Bool
     var onEditingChange: (Bool) -> Void = { _ in }
-
     @StateObject private var session = ScrubSession()
 
     var body: some View {
-        TimelineView(
-            .animation(
-                minimumInterval: 1,
-                paused: !player.isPlaying
-                    || session.editing
-                    || !isExpanded
-            )
-        ) { context in
-            let maximum = player.duration.isFinite
-                ? max(1, player.duration)
-                : 1
-
-            let live = min(
-                maximum,
-                max(
-                    0,
-                    player.playbackPosition(at: context.date)
-                )
-            )
-
+        TimelineView(.animation(minimumInterval: 1,
+            paused: !player.isPlaying || session.editing || !isExpanded)) { context in
+            let maximum = player.duration.isFinite ? max(1, player.duration) : 1
+            let live = min(maximum, max(0, player.playbackPosition(at: context.date)))
             let displayed = session.draft ?? live
-
             HStack(spacing: 10) {
-                // Elapsed time.
-                Text(timeLabel(displayed))
-                    .frame(width: 34, alignment: .leading)
-
+                Text(timeLabel(displayed)).frame(width: 34, alignment: .leading)
                 GeometryReader { geometry in
                     ZStack(alignment: .leading) {
-                        // Full song length.
-                        Capsule()
-                            .fill(.white.opacity(0.18))
-
-                        // Elapsed portion.
-                        Capsule()
-                            .fill(.white)
-                            .frame(
-                                width: geometry.size.width * CGFloat(
-                                    min(
-                                        1,
-                                        max(0, displayed / maximum)
-                                    )
-                                )
-                            )
+                        Capsule().fill(.white.opacity(0.18))
+                        Capsule().fill(.white)
+                            .frame(width: geometry.size.width * CGFloat(
+                                min(1, max(0, displayed / maximum))))
                     }
                     .frame(height: 4)
-                    .frame(
-                        maxWidth: .infinity,
-                        maxHeight: .infinity
-                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .contentShape(Rectangle())
-                    .gesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { value in
-                                guard player.seekTarget != nil else {
-                                    return
-                                }
-
-                                begin(at: live)
-
-                                updateDraft(
-                                    location: value.location.x,
-                                    width: geometry.size.width,
-                                    duration: maximum
-                                )
+                    .gesture(DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            guard player.seekTarget != nil else { return }
+                            begin(at: live)
+                            updateDraft(location: value.location.x,
+                                        width: geometry.size.width, duration: maximum)
+                        }
+                        .onEnded { value in
+                            guard session.editing, !session.cancelled else {
+                                reset(); return
                             }
-                            .onEnded { value in
-                                guard
-                                    session.editing,
-                                    !session.cancelled
-                                else {
-                                    reset()
-                                    return
-                                }
-
-                                updateDraft(
-                                    location: value.location.x,
-                                    width: geometry.size.width,
-                                    duration: maximum
-                                )
-
-                                finish()
-                            }
-                    )
+                            updateDraft(location: value.location.x,
+                                        width: geometry.size.width, duration: maximum)
+                            finish()
+                        })
                 }
-                .frame(height: 16)
-                .allowsHitTesting(player.seekTarget != nil)
-                .opacity(player.seekTarget == nil ? 0.35 : 1)
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Playback position")
-                .accessibilityValue(
-                    "\(timeLabel(displayed)) of "
-                        + timeLabel(player.duration)
-                )
-                .accessibilityAdjustableAction { direction in
-                    guard let target = player.seekTarget else {
-                        return
+                    .frame(height: 16)
+                    .allowsHitTesting(player.seekTarget != nil)
+                    .opacity(player.seekTarget == nil ? 0.35 : 1)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Playback position")
+                    .accessibilityValue("\(timeLabel(displayed)) of \(timeLabel(player.duration))")
+                    .accessibilityAdjustableAction { direction in
+                        guard let target = player.seekTarget else { return }
+                        let delta: Double = direction == .increment ? 5 : -5
+                        player.seek(to: player.playbackPosition(at: .now) + delta,
+                                    expected: target)
                     }
-
-                    let delta: Double
-
-                    switch direction {
-                    case .increment:
-                        delta = 5
-                    case .decrement:
-                        delta = -5
-                    @unknown default:
-                        return
-                    }
-
-                    player.seek(
-                        to: player.playbackPosition(at: .now) + delta,
-                        expected: target
-                    )
-                }
-
-                // Remaining time.
-                Text(
-                    "-" + timeLabel(
-                        max(0, player.duration - displayed)
-                    )
-                )
-                .frame(width: 40, alignment: .trailing)
+                Text("-" + timeLabel(max(0, player.duration - displayed)))
+                    .frame(width: 40, alignment: .trailing)
             }
-            .font(
-                .system(
-                    size: 11,
-                    weight: .medium,
-                    design: .rounded
-                )
-            )
-            .monospacedDigit()
-            .foregroundStyle(.gray)
-            .frame(height: 16)
+            .font(.system(size: 11, weight: .medium, design: .rounded))
+            .monospacedDigit().foregroundStyle(.gray).frame(height: 16)
         }
         .onChange(of: player.seekTarget) { _, _ in
-            // Never apply a drag to a different song or source.
-            if session.editing {
-                session.cancelled = true
-                session.draft = nil
-                session.target = nil
-            }
+            if session.editing { session.cancelled = true; session.draft = nil; session.target = nil }
         }
-        .onChange(of: isExpanded) { _, expanded in
-            if !expanded {
-                reset()
-            }
-        }
-        .onDisappear {
-            reset()
-        }
+        .onChange(of: isExpanded) { _, expanded in if !expanded { reset() } }
+        .onDisappear { reset() }
     }
 
     private func begin(at position: Double) {
         guard !session.editing else { return }
-
         session.editing = true
+        onEditingChange(true)
         session.cancelled = false
         session.target = player.seekTarget
         session.draft = position
-
-        onEditingChange(true)
     }
 
-    private func updateDraft(
-        location: CGFloat,
-        width: CGFloat,
-        duration: Double
-    ) {
+    private func updateDraft(location: CGFloat, width: CGFloat, duration: Double) {
         guard !session.cancelled else { return }
-
-        let fraction = min(
-            1,
-            max(0, location / max(1, width))
-        )
-
-        session.draft = Double(fraction) * duration
+        session.draft = Double(min(1, max(0, location / max(1, width)))) * duration
     }
 
     private func finish() {
         defer { reset() }
-
-        guard
-            !session.cancelled,
-            let target = session.target,
-            let draft = session.draft
-        else {
-            return
-        }
-
-        // Commit once when the mouse is released.
+        guard !session.cancelled, let target = session.target, let draft = session.draft else { return }
         player.seek(to: draft, expected: target)
     }
 
     private func reset() {
         let wasEditing = session.editing
-
-        session.editing = false
-        session.cancelled = false
-        session.draft = nil
-        session.target = nil
-
-        if wasEditing {
-            onEditingChange(false)
-        }
+        session.editing = false; session.cancelled = false
+        session.draft = nil; session.target = nil
+        if wasEditing { onEditingChange(false) }
     }
 
     private func timeLabel(_ seconds: Double) -> String {
-        let value = Int(
-            max(0, seconds.isFinite ? seconds : 0)
-        )
+        let value = Int(max(0, seconds.isFinite ? seconds : 0))
+        return "\(value / 60):" + String(format: "%02d", value % 60)
+    }
+}
 
-        return "\(value / 60):"
-            + String(format: "%02d", value % 60)
+// MARK: - Persistent App Settings
+
+enum SourcePreference: String, CaseIterable, Identifiable {
+    case auto, music, spotify
+    var id: String { rawValue }
+    var title: String { switch self { case .auto: "Auto"; case .music: "Music"; case .spotify: "Spotify" } }
+    var source: MusicSource? { switch self { case .auto: nil; case .music: .appleMusic; case .spotify: .spotify } }
+}
+
+@MainActor
+final class MinnowSettings: ObservableObject {
+    static let shared = MinnowSettings()
+    private let defaults: UserDefaults
+    @Published var islandEnabled: Bool { didSet { save("islandEnabled", islandEnabled) } }
+    @Published var source: SourcePreference { didSet { save("mediaSourcePreference", source.rawValue) } }
+    @Published var openSettingsOnLaunch: Bool { didSet { save("openSettingsOnLaunch", openSettingsOnLaunch) } }
+    @Published var automaticSizing: Bool { didSet { save("automaticIslandSizing", automaticSizing) } }
+    @Published var compactWing: Double { didSet { save("compactWingWidth", compactWing) } }
+    @Published var expandedWidth: Double { didSet { save("expandedIslandWidth", expandedWidth) } }
+    @Published var expandedHeight: Double { didSet { save("expandedIslandHeight", expandedHeight) } }
+    @Published var allDisplays: Bool { didSet { save("islandOnAllDisplays", allDisplays) } }
+    @Published var display: String { didSet { save("islandDisplayUUID", display) } }
+    @Published var glass: Bool { didSet { save("islandGlassAppearance", glass) } }
+    @Published var opacity: Double { didSet { save("islandBackgroundOpacity", opacity) } }
+    @Published var expandOnHover: Bool { didSet { save("expandIslandOnHover", expandOnHover) } }
+    @Published var haptics: Bool { didSet { save("islandHaptics", haptics) } }
+    @Published var artwork: Bool { didSet { save("showAlbumArtwork", artwork) } }
+    @Published var leftAction: PlayerAction { didSet { save("islandPlayerAction", leftAction.rawValue) } }
+    @Published var audioReactive: Bool { didSet { save("audioReactiveWavesEnabled", audioReactive) } }
+    @Published var collapseOnPause: Bool { didSet { save("collapseIslandOnPause", collapseOnPause) } }
+    @Published var collapseDelay: Double { didSet { save("islandCollapseDelay", collapseDelay) } }
+    @Published var hideOnPause: Bool { didSet { save("hideIslandOnPause", hideOnPause) } }
+    @Published var hideDelay: Double { didSet { save("islandHideDelay", hideDelay) } }
+    @Published var showMenuBar: Bool { didSet { save("showMinnowMenuBar", showMenuBar) } }
+    @Published var hideFullscreen: Bool { didSet { save("hideMinnowFullscreen", hideFullscreen) } }
+    @Published var backgroundBlur: Bool { didSet { save("minnowBackgroundBlur", backgroundBlur) } }
+    @Published var mediaEnabled: Bool { didSet { save("minnowMediaEnabled", mediaEnabled) } }
+    @Published var showLeftButton: Bool { didSet { save("minnowShowLeftButton", showLeftButton) } }
+    @Published var explicitTag: Bool { didSet { save("minnowExplicitTag", explicitTag) } }
+    @Published var explicitColor: Bool { didSet { save("minnowExplicitColor", explicitColor) } }
+    @Published var animateArtwork: Bool { didSet { save("minnowAnimateArtwork", animateArtwork) } }
+    @Published var heartSongColor: Bool { didSet { save("minnowHeartSongColor", heartSongColor) } }
+    @Published var collapseAfterScrub: Bool { didSet { save("minnowCollapseAfterScrub", collapseAfterScrub) } }
+    @Published var notchWidthOffset: Double { didSet { save("minnowNotchWidthOffset", notchWidthOffset) } }
+    @Published var notchHeightOffset: Double { didSet { save("minnowNotchHeightOffset", notchHeightOffset) } }
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        func bool(_ key: String, _ fallback: Bool) -> Bool { defaults.object(forKey: key) as? Bool ?? fallback }
+        func number(_ key: String, _ fallback: Double, _ range: ClosedRange<Double>) -> Double {
+            let value = defaults.object(forKey: key) as? Double ?? fallback
+            return value.isFinite ? min(range.upperBound, max(range.lowerBound, value)) : fallback
+        }
+        showMenuBar = bool("showMinnowMenuBar", true)
+        hideFullscreen = bool("hideMinnowFullscreen", false)
+        backgroundBlur = bool("minnowBackgroundBlur", false)
+        mediaEnabled = bool("minnowMediaEnabled", true)
+        showLeftButton = bool("minnowShowLeftButton", true)
+        explicitTag = bool("minnowExplicitTag", true)
+        explicitColor = bool("minnowExplicitColor", false)
+        animateArtwork = bool("minnowAnimateArtwork", false)
+        heartSongColor = bool("minnowHeartSongColor", false)
+        collapseAfterScrub = bool("minnowCollapseAfterScrub", false)
+        notchWidthOffset = number("minnowNotchWidthOffset", 0, -40...120)
+        notchHeightOffset = number("minnowNotchHeightOffset", 0, -8...30)
+        islandEnabled = bool("islandEnabled", true)
+        source = SourcePreference(rawValue: defaults.string(forKey: "mediaSourcePreference") ?? "") ?? .auto
+        openSettingsOnLaunch = bool("openSettingsOnLaunch", true)
+        automaticSizing = bool("automaticIslandSizing", true)
+        compactWing = number("compactWingWidth", 26, 20...60)
+        expandedWidth = number("expandedIslandWidth", 400, 340...600)
+        expandedHeight = number("expandedIslandHeight", 174, 174...280)
+        allDisplays = bool("islandOnAllDisplays", false)
+        display = defaults.string(forKey: "islandDisplayUUID") ?? "automatic"
+        glass = bool("islandGlassAppearance", false)
+        opacity = number("islandBackgroundOpacity", 1, 0.35...1)
+        expandOnHover = bool("expandIslandOnHover", false)
+        haptics = bool("islandHaptics", false)
+        artwork = bool("showAlbumArtwork", true)
+        leftAction = PlayerAction(rawValue: defaults.string(forKey: "islandPlayerAction") ?? "") ?? .like
+        audioReactive = bool("audioReactiveWavesEnabled", true)
+        collapseOnPause = bool("collapseIslandOnPause", false)
+        collapseDelay = number("islandCollapseDelay", 3, 0...30)
+        hideOnPause = bool("hideIslandOnPause", false)
+        hideDelay = number("islandHideDelay", 15, 0...120)
+    }
+
+    var configuration: IslandConfiguration {
+        var value = IslandConfiguration()
+        value.hoverEnabled = expandOnHover
+        if !automaticSizing {
+            value.miniPlayerWingWidth = compactWing
+            value.expandedWidth = expandedWidth
+            value.expandedContentHeight = expandedHeight
+        }
+        return value
+    }
+
+    func resetPreferences() {
+        islandEnabled = true; source = .auto; openSettingsOnLaunch = true
+        automaticSizing = true; compactWing = 26; expandedWidth = 400; expandedHeight = 174
+        allDisplays = false; display = "automatic"; glass = false; opacity = 1
+        expandOnHover = false; haptics = false; artwork = true; leftAction = .like
+        audioReactive = true; collapseOnPause = false; collapseDelay = 3
+        hideOnPause = false; hideDelay = 15
+        showMenuBar = true
+        hideFullscreen = false
+        backgroundBlur = false
+        mediaEnabled = true
+        showLeftButton = true
+        explicitTag = true
+        explicitColor = false
+        animateArtwork = false
+        heartSongColor = false
+        collapseAfterScrub = false
+        notchWidthOffset = 0; notchHeightOffset = 0
+    }
+
+    private func save(_ key: String, _ value: Any) { defaults.set(value, forKey: key) }
+}
+
+// MARK: - Login Item
+
+@MainActor
+final class LoginItemSettings: ObservableObject {
+    @Published private(set) var enabled = false
+    @Published private(set) var requiresApproval = false
+    @Published private(set) var error: String?
+    var isBundled: Bool { Bundle.main.bundleURL.pathExtension == "app" }
+
+    func refresh() {
+        guard isBundled else { enabled = false; requiresApproval = false; return }
+        let status = SMAppService.mainApp.status
+        enabled = status == .enabled || status == .requiresApproval
+        requiresApproval = status == .requiresApproval
+    }
+
+    func setEnabled(_ desired: Bool) {
+        guard isBundled else { error = "Launch at login requires the bundled Minnow.app"; return }
+        do {
+            if desired { try SMAppService.mainApp.register() }
+            else { try SMAppService.mainApp.unregister() }
+            error = nil
+        } catch { self.error = error.localizedDescription }
+        refresh()
+    }
+}
+
+// MARK: - Displays
+
+struct MinnowDisplay: Identifiable {
+    let id: String
+    let name: String
+    let nativeID: CGDirectDisplayID
+
+    @MainActor static func from(_ screen: NSScreen) -> MinnowDisplay? {
+        guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
+        let id = CGDirectDisplayID(number.uint32Value)
+        let uuid = CGDisplayCreateUUIDFromDisplayID(id).takeRetainedValue()
+        return MinnowDisplay(id: CFUUIDCreateString(nil, uuid) as String,
+                             name: screen.localizedName, nativeID: id)
+    }
+}
+
+@MainActor
+final class DisplaySettings: ObservableObject {
+    @Published private(set) var displays: [MinnowDisplay] = []
+    func refresh() { displays = NSScreen.screens.compactMap(MinnowDisplay.from) }
+}
+
+// MARK: - Shared Playback Session
+
+@MainActor
+final class IslandMediaSession {
+    let player = MediaPlayer()
+    let audio = MusicAudioLevels()
+    let outputs = AudioOutputs()
+    let accessories: PlayerAccessories
+    private var subscriptions = Set<AnyCancellable>()
+
+    init() {
+        accessories = PlayerAccessories(player: player)
+        audio.setSuspended(true)
+        player.$captureTarget.removeDuplicates().sink { [weak self] target in
+            self?.audio.setPlayback(target)
+        }.store(in: &subscriptions)
+    }
+
+    func start() { outputs.start(); player.start() }
+    func apply(_ settings: MinnowSettings) {
+        player.setSourcePreference(settings.source)
+        if audio.isEnabled != settings.audioReactive { audio.setEnabled(settings.audioReactive) }
+    }
+    func stop() {
+        accessories.stop(); outputs.stop(); player.stop(); audio.stop()
+        subscriptions.removeAll()
+    }
+}
+
+// MARK: - Display and Visibility Coordination
+
+@MainActor
+final class IslandCoordinator {
+    let settings: MinnowSettings
+    let session = IslandMediaSession()
+    private var controllers: [CGDirectDisplayID: IslandWindowController] = [:]
+    private var subscriptions = Set<AnyCancellable>()
+    private var pauseTask: Task<Void, Never>?
+    private var sessionActive = true
+    private var hiddenAfterPause = false
+    private var previouslyEnabled = true
+    private var visibilityTask: Task<Void, Never>?
+
+    init(settings: MinnowSettings) { self.settings = settings }
+
+    func start() {
+        session.apply(settings)
+        settings.objectWillChange
+            .debounce(for: .milliseconds(50), scheduler: RunLoop.main)
+            .sink { [weak self] in self?.applySettings() }
+            .store(in: &subscriptions)
+        session.player.$captureTarget.removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.playbackChanged() }
+            .store(in: &subscriptions)
+        session.start()
+        reconcileDisplays()
+    }
+
+    func applySettings() {
+        session.apply(settings)
+        if settings.islandEnabled && !previouslyEnabled { hiddenAfterPause = false }
+        previouslyEnabled = settings.islandEnabled
+        if !settings.hideOnPause { hiddenAfterPause = false }
+        reconcileDisplays()
+        schedulePauseActions()
+    }
+
+    func reconcileDisplays(reposition: Bool = false) {
+        let screens = chosenScreens()
+        let ids = Set(screens.compactMap { MinnowDisplay.from($0)?.nativeID })
+        for id in Array(controllers.keys) where !ids.contains(id) {
+            controllers.removeValue(forKey: id)?.stop()
+        }
+        let visible = settings.islandEnabled && settings.mediaEnabled && sessionActive && !hiddenAfterPause
+        var anyVisible = false
+        for screen in screens {
+            guard let id = MinnowDisplay.from(screen)?.nativeID else { continue }
+            if controllers[id] == nil {
+                controllers[id] = IslandWindowController(session: session, settings: settings, displayID: id)
+            }
+            guard let controller = controllers[id] else { continue }
+            controller.applySettings(reposition: reposition)
+            if visible && !(settings.hideFullscreen && FullscreenVisibility.covers(screen)) {
+                anyVisible = true
+                if !controller.isVisible { controller.show() }
+            } else { controller.hide() }
+        }
+        session.audio.setSuspended(!anyVisible)
+    }
+
+    func refreshVisibility() {
+        visibilityTask?.cancel()
+        visibilityTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
+            self?.reconcileDisplays()
+        }
+    }
+
+    func setSessionActive(_ active: Bool) {
+        sessionActive = active
+        reconcileDisplays()
+    }
+
+    func reposition() { reconcileDisplays(reposition: true) }
+    func refresh() { session.player.refresh(); session.accessories.refresh() }
+    func retryCapture() {
+        guard settings.audioReactive else { return }
+        session.audio.setEnabled(false)
+        session.audio.setEnabled(true)
+        reconcileDisplays()
+    }
+    func stop() {
+        pauseTask?.cancel()
+        visibilityTask?.cancel()
+        subscriptions.removeAll()
+        controllers.values.forEach { $0.stop() }
+        controllers.removeAll()
+        session.stop()
+    }
+
+    private func chosenScreens() -> [NSScreen] {
+        if settings.allDisplays { return NSScreen.screens }
+        if settings.display == "main", let main = NSScreen.screens.first(where: {
+            MinnowDisplay.from($0)?.nativeID == CGMainDisplayID()
+        }) { return [main] }
+        if settings.display != "automatic",
+           let selected = NSScreen.screens.first(where: { MinnowDisplay.from($0)?.id == settings.display }) {
+            return [selected]
+        }
+        let builtIn = NSScreen.screens.first { screen in
+            guard let id = MinnowDisplay.from(screen)?.nativeID else { return false }
+            return CGDisplayIsBuiltin(id) != 0
+        }
+        return (builtIn ?? NSScreen.screens.first).map { [$0] } ?? []
+    }
+
+    private func playbackChanged() {
+        if session.player.isPlaying {
+            pauseTask?.cancel()
+            hiddenAfterPause = false
+            reconcileDisplays()
+        } else { schedulePauseActions() }
+    }
+
+    private func schedulePauseActions() {
+        pauseTask?.cancel()
+        guard !session.player.isPlaying, session.player.track != nil,
+              settings.islandEnabled, settings.collapseOnPause || settings.hideOnPause else { return }
+        let collapse = settings.collapseOnPause ? settings.collapseDelay : Double.infinity
+        let hide = settings.hideOnPause ? settings.hideDelay : Double.infinity
+        pauseTask = Task { @MainActor [weak self] in
+            let first = min(collapse, hide)
+            do { try await Task.sleep(for: .seconds(first)) } catch { return }
+            guard let self, !self.session.player.isPlaying else { return }
+            if collapse <= hide { self.controllers.values.forEach { $0.collapse() } }
+            if hide <= collapse {
+                self.hiddenAfterPause = true
+                self.reconcileDisplays()
+                return
+            }
+            guard hide.isFinite else { return }
+            do { try await Task.sleep(for: .seconds(max(0, hide - collapse))) } catch { return }
+            guard !self.session.player.isPlaying else { return }
+            self.hiddenAfterPause = true
+            self.reconcileDisplays()
+        }
+    }
+}
+
+// MARK: - Native Settings Window
+
+enum SettingsPage: String, CaseIterable, Identifiable {
+    case general, playback, appearance
+    var id: String { rawValue }
+    var title: String { switch self { case .general: "General"; case .playback: "Media"; case .appearance: "Appearance" } }
+    var symbol: String { switch self { case .general: "gearshape"; case .playback: "play.fill"; case .appearance: "paintpalette" } }
+    var keywords: String {
+        switch self {
+        case .general: "launch login startup display visibility fullscreen menu hover haptic reset"
+        case .playback: "music spotify source heart shuffle repeat artwork explicit waveform pause hide scrub eq"
+        case .appearance: "glass blur opacity sizing notch width height motion"
+        }
+    }
+}
+
+@MainActor
+final class SettingsNavigation: ObservableObject {
+    @Published var selected: SettingsPage? = .general
+}
+
+@MainActor
+final class MinnowSettingsWindow: NSWindowController {
+    init(settings: MinnowSettings, coordinator: IslandCoordinator) {
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 860, height: 730),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                              backing: .buffered, defer: false)
+        window.title = "Minnow Settings"
+        window.minSize = CGSize(width: 740, height: 520)
+        window.isReleasedWhenClosed = false
+        window.toolbarStyle = .unified
+        window.titlebarAppearsTransparent = true
+        window.backgroundColor = NSColor.windowBackgroundColor
+        window.setFrameAutosaveName("MinnowSettingsWindow")
+        window.contentView = NSHostingView(rootView: MinnowSettingsView(settings: settings, coordinator: coordinator))
+        if !window.setFrameUsingName("MinnowSettingsWindow") { window.center() }
+        super.init(window: window)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+    func open() {
+        showWindow(nil)
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+struct MinnowSettingsView: View {
+    @ObservedObject var settings: MinnowSettings
+    let coordinator: IslandCoordinator
+    @StateObject private var navigation = SettingsNavigation()
+    @StateObject private var login = LoginItemSettings()
+    @StateObject private var displays = DisplaySettings()
+    @ObservedObject private var spotify = SpotifyAccount.shared
+    @State private var search = ""
+    @State private var confirmReset = false
+
+    private var pages: [SettingsPage] {
+        SettingsPage.allCases.filter { search.isEmpty || ($0.title + " " + $0.keywords).localizedCaseInsensitiveContains(search) }
+    }
+    private var page: SettingsPage { navigation.selected ?? .general }
+
+    var body: some View {
+        NavigationSplitView {
+            VStack(spacing: 18) {
+                HStack(spacing: 10) {
+                    Image(systemName: "waveform").font(.title2).foregroundStyle(.white)
+                        .frame(width: 38, height: 38)
+                        .background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Minnow").font(.headline)
+                        Text("Make it yours").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }.padding(.top, 20)
+                HStack {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    TextField("Search settings", text: $search).textFieldStyle(.plain)
+                        .accessibilityLabel("Search settings")
+                    if !search.isEmpty { Button { search = "" } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain) }
+                }.padding(10).background(.white.opacity(0.06), in: Capsule())
+                List(selection: $navigation.selected) {
+                    ForEach(pages) { item in
+                        HStack(spacing: 12) {
+                            Image(systemName: item.symbol)
+                                .font(.system(size: 16, weight: .medium))
+                                .frame(width: 34, height: 34)
+                                .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
+                                .overlay(RoundedRectangle(cornerRadius: 10).stroke(.white.opacity(0.10)))
+                            Text(item.title).font(.system(size: 14, weight: .semibold))
+                        }.padding(.vertical, 5).tag(item)
+                    }
+                }.listStyle(.sidebar).scrollContentBackground(.hidden)
+                Spacer(minLength: 0)
+                Text("Minnow V1").font(.caption).foregroundStyle(.tertiary).padding(.bottom, 16)
+            }.padding(.horizontal, 14)
+                .background(.ultraThinMaterial)
+                .navigationSplitViewColumnWidth(min: 205, ideal: 220, max: 250)
+        } detail: {
+            VStack(alignment: .leading, spacing: 0) {
+                Label(page.title, systemImage: page.symbol)
+                    .font(.system(size: 27, weight: .bold)).padding(.horizontal, 30).padding(.vertical, 24)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 24) {
+                        if pages.isEmpty {
+                            ContentUnavailableView.search(text: search)
+                        } else {
+                            switch page {
+                            case .general: general
+                            case .playback: playback
+                            case .appearance: appearance
+                            }
+                        }
+                    }.padding(.horizontal, 28).padding(.bottom, 28)
+                        .frame(maxWidth: 700, alignment: .leading)
+                        .frame(maxWidth: .infinity)
+                }
+            }.frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(nsColor: .windowBackgroundColor).opacity(0.9))
+        }
+        .preferredColorScheme(.dark)
+        .tint(.blue)
+        .toggleStyle(.switch)
+        .controlSize(.small)
+        .onAppear { login.refresh(); displays.refresh() }
+        .onChange(of: search) { _, _ in
+            if !pages.contains(page) { navigation.selected = pages.first }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in login.refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in displays.refresh() }
+        .confirmationDialog("Reset Minnow preferences?", isPresented: $confirmReset) {
+            Button("Reset Settings", role: .destructive) { settings.resetPreferences() }
+        } message: { Text("Restores appearance and player preferences. Your Spotify connection and macOS login-item registration are kept.") }
+    }
+
+    private var general: some View {
+        Group {
+            VStack(spacing: 10) {
+                Image(systemName: "waveform").font(.system(size: 36, weight: .medium))
+                    .frame(width: 78, height: 78).background(.white.opacity(0.07), in: Circle())
+                Text("A little space for your music.").font(.title3.bold())
+                Text("Personalize the island, your displays, and everyday interactions.")
+                    .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            }.frame(maxWidth: .infinity).padding(.vertical, 10)
+            SettingsCard {
+                Toggle("Launch at Login", isOn: Binding(get: { login.enabled }, set: login.setEnabled))
+                    .disabled(!login.isBundled)
+                Divider()
+                Toggle("Open Settings on Launch", isOn: $settings.openSettingsOnLaunch)
+                if login.requiresApproval {
+                    Button("Allow in System Settings…") { SMAppService.openSystemSettingsLoginItems() }
+                }
+                if let error = login.error { note(error, color: .orange) }
+                if !login.isBundled { note("Launch the bundled Minnow.app to enable launch at login.") }
+            }
+            SettingsGroup("Display", caption: "Choose which screens show the island.") {
+                Picker(selection: displaySelection) {
+                    Text("Automatic · Built-in Preferred").tag("automatic")
+                    Text("All Displays").tag("all")
+                    Text("Main Display").tag("main")
+                    ForEach(displays.displays) { display in Text(display.name).tag(display.id) }
+                    if settings.display != "automatic", settings.display != "main",
+                       !displays.displays.contains(where: { $0.id == settings.display }) {
+                        Text("Disconnected · Automatic Fallback").tag(settings.display)
+                    }
+                } label: { Label("Display", systemImage: "display") }
+                Divider()
+                Button("Reposition Island") { coordinator.reposition() }
+            }
+            SettingsGroup("Visibility", caption: "Reopen Minnow from Finder to reach Settings if you hide its menu bar icon.") {
+                Toggle("Enable Island", isOn: $settings.islandEnabled)
+                Divider()
+                Toggle("Hide in Fullscreen", isOn: $settings.hideFullscreen)
+                Divider()
+                Toggle("Menu Bar Icon", isOn: $settings.showMenuBar)
+                Divider()
+                Toggle("Hide from Screen Capture", isOn: .constant(false)).disabled(true)
+                note("Unavailable: macOS no longer provides reliable window exclusion for modern screen recorders.")
+            }
+            SettingsGroup("Behaviour") {
+                Toggle("Haptic Touch", isOn: $settings.haptics)
+                Divider()
+                Toggle("Expand on Hover", isOn: $settings.expandOnHover)
+                note("Click to pin the player open. Haptics require supported hardware.")
+            }
+            SettingsCard {
+                Button("Reset All Settings", role: .destructive) { confirmReset = true }
+                    .frame(maxWidth: .infinity)
+            }
+        }
+    }
+
+    private var playback: some View {
+        Group {
+            SettingsCard { Toggle("Media Player", isOn: $settings.mediaEnabled) }
+            SettingsGroup("Source", caption: "Auto follows the player that most recently starts playing. Choose Music or Spotify to keep that source selected.") {
+                HStack(spacing: 10) {
+                    ForEach(SourcePreference.allCases) { source in
+                        SourceChoice(source: source, selected: settings.source == source) { settings.source = source }
+                    }
+                }
+            }
+            SettingsGroup("Left Button", caption: "The right button always opens the audio output selector.") {
+                HStack(spacing: 8) {
+                    actionChoice("heart.fill", "Like Song", action: .like)
+                    actionChoice("shuffle", "Shuffle", action: .shuffle)
+                    actionChoice("repeat", "Repeat Song", action: .replay)
+                    choice("nosign", title: "None", selected: !settings.showLeftButton) { settings.showLeftButton = false }
+                }
+            }
+            SettingsGroup("Appearance") {
+                Toggle("Show Album Artwork", isOn: $settings.artwork)
+                Divider()
+                Toggle("Animate Artwork", isOn: $settings.animateArtwork).disabled(!settings.artwork)
+                note("Adds gentle motion to the cover image while playing. Video album artwork is not supplied by the desktop players.")
+                Divider()
+                Toggle("Explicit Tag", isOn: $settings.explicitTag)
+                Divider()
+                Toggle("Explicit Color Match", isOn: $settings.explicitColor).disabled(!settings.explicitTag)
+                note("Explicit status is available for the connected Spotify account when it matches the desktop track. Music does not expose this status here.")
+                Divider()
+                Toggle("Heart Matches Song Color", isOn: $settings.heartSongColor)
+            }
+            SettingsGroup("Waveform", caption: "Live waveform measures the selected player's audio and displays the macOS capture indicator while active.") {
+                Toggle("Live Waveform", isOn: $settings.audioReactive)
+                Button("Retry Audio Capture") { coordinator.retryCapture() }
+            }
+            SettingsGroup("Behaviour") {
+                Toggle("Collapse on Pause", isOn: $settings.collapseOnPause)
+                if settings.collapseOnPause {
+                    SettingsSlider(title: "Collapse After", value: $settings.collapseDelay, range: 0...30, suffix: "s")
+                }
+                Divider()
+                Picker("Hide After Pausing", selection: pauseHideSelection) {
+                    Text("Never").tag(-1.0)
+                    Text("Instant").tag(0.0)
+                    ForEach([3.0, 5, 10, 15, 30, 60, 120], id: \.self) { value in
+                        Text("\(Int(value)) seconds").tag(value)
+                    }
+                    if settings.hideOnPause, ![0.0, 3, 5, 10, 15, 30, 60, 120].contains(settings.hideDelay) {
+                        Text("\(Int(settings.hideDelay)) seconds").tag(settings.hideDelay)
+                    }
+                }
+                Divider()
+                Toggle("Collapse After Seeking", isOn: $settings.collapseAfterScrub)
+                note("Playback resuming reveals an automatically hidden island. The Hide menu action keeps it hidden until you choose Show.")
+            }
+            SettingsGroup("Equalizer") {
+                Toggle("EQ", isOn: .constant(false)).disabled(true)
+                note("Deferred: system audio processing needs a separate audio engine. Use the equalizer in your music app for now.")
+            }
+            SettingsGroup("Spotify Account") {
+                LabeledContent("Connection", value: spotify.isConnected ? "Connected" : "Not Connected")
+                note(spotify.status)
+                HStack {
+                    Button(spotify.isConnecting ? "Connecting…" : "Connect Spotify…") { spotify.showConnectionPrompt() }
+                        .disabled(spotify.isConnecting)
+                    if spotify.isConnected { Button("Disconnect") { spotify.disconnect() } }
+                }
+                note("Connect for Liked Songs, repeat-one, and explicit labels. Desktop playback and seeking work without sign-in.")
+            }
+        }
+    }
+
+    private var appearance: some View {
+        Group {
+            VStack(spacing: 14) {
+                RoundedRectangle(cornerRadius: 24)
+                    .fill(settings.glass || settings.backgroundBlur ? Color.white.opacity(0.09) : Color.black.opacity(settings.opacity))
+                    .overlay {
+                        HStack(spacing: 16) {
+                            Image(systemName: "music.note").font(.title2).foregroundStyle(.pink)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Your music, at a glance").font(.headline)
+                                Text("Minnow").font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "waveform").foregroundStyle(.pink)
+                        }.padding(22)
+                    }
+                    .frame(height: 96)
+                    .overlay(RoundedRectangle(cornerRadius: 24).stroke(.white.opacity(0.08)))
+                Text("Appearance changes apply immediately.").font(.caption).foregroundStyle(.secondary)
+            }.padding(.vertical, 5)
+            SettingsGroup("Glass") {
+                Toggle("Liquid Glass View", isOn: $settings.glass)
+                Divider()
+                SettingsSlider(title: settings.glass ? "Glass Tint" : "Background Opacity", value: $settings.opacity,
+                               range: 0.35...1, suffix: "%", multiplier: 100)
+                HStack { Text("Clear"); Spacer(); Text("Dark") }.font(.caption).foregroundStyle(.secondary)
+                note("Native Liquid Glass on macOS 26 and later; blurred material on earlier versions. Controls remain opaque.")
+                Divider()
+                Toggle("Background Blur", isOn: $settings.backgroundBlur).disabled(settings.glass)
+                note("Glass includes its own blur. Background Blur applies when Liquid Glass is off.")
+            }
+            SettingsGroup("Sizing") {
+                Toggle("Automatic Sizing", isOn: $settings.automaticSizing)
+                if !settings.automaticSizing {
+                    Divider()
+                    SettingsSlider(title: "Compact Side Width", value: $settings.compactWing, range: 20...60, suffix: "pt")
+                    SettingsSlider(title: "Expanded Width", value: $settings.expandedWidth, range: 340...600, suffix: "pt")
+                    SettingsSlider(title: "Expanded Height", value: $settings.expandedHeight, range: 174...280, suffix: "pt")
+                }
+            }
+            SettingsGroup("Notch Tuning", caption: "Offsets from the size reported by the display. Dimensions use macOS points.") {
+                SettingsSlider(title: "Notch Width", value: $settings.notchWidthOffset, range: -40...120, suffix: "pt")
+                Divider()
+                SettingsSlider(title: "Notch Height", value: $settings.notchHeightOffset, range: -8...30, suffix: "pt")
+                Button("Reset Tuning") { settings.notchWidthOffset = 0; settings.notchHeightOffset = 0 }
+            }
+            SettingsGroup("Motion") {
+                note("Minnow follows the system Reduce Motion setting for transitions, artwork motion, and waveform animation.")
+            }
+        }
+    }
+
+    private var displaySelection: Binding<String> {
+        Binding(get: { settings.allDisplays ? "all" : settings.display }, set: { value in
+            settings.allDisplays = value == "all"
+            if value != "all" { settings.display = value }
+        })
+    }
+    private var pauseHideSelection: Binding<Double> {
+        Binding(get: { settings.hideOnPause ? settings.hideDelay : -1 }, set: { value in
+            settings.hideOnPause = value >= 0
+            if value >= 0 { settings.hideDelay = value }
+        })
+    }
+    private func note(_ text: String, color: Color = .secondary) -> some View {
+        Text(text).font(.system(size: 11)).foregroundStyle(color).fixedSize(horizontal: false, vertical: true)
+    }
+    private func actionChoice(_ symbol: String, _ title: String, action: PlayerAction) -> some View {
+        choice(symbol, title: title, selected: settings.showLeftButton && settings.leftAction == action) {
+            settings.leftAction = action; settings.showLeftButton = true
+        }
+    }
+    private func choice(_ symbol: String, title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: 19, weight: .semibold))
+                .frame(maxWidth: .infinity).frame(height: 46)
+                .background(.white.opacity(selected ? 0.16 : 0.04), in: RoundedRectangle(cornerRadius: 13))
+                .overlay(RoundedRectangle(cornerRadius: 13).stroke(.white.opacity(selected ? 0.4 : 0.09), lineWidth: selected ? 2 : 1))
+        }.buttonStyle(.plain).help(title).accessibilityLabel(title)
+            .accessibilityValue(selected ? "Selected" : "Not Selected")
+    }
+}
+
+
+struct SettingsSlider: View {
+    let title: String
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let suffix: String
+    var multiplier = 1.0
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text("\(Int((value * multiplier).rounded())) \(suffix)")
+                    .monospacedDigit().foregroundStyle(.secondary)
+            }
+            Slider(value: $value, in: range)
+                .accessibilityLabel(title)
+        }.padding(.vertical, 3)
+    }
+}
+
+
+// MARK: - Settings Components
+
+struct SettingsCard<Content: View>: View {
+    @ViewBuilder var content: Content
+    var body: some View {
+        VStack(alignment: .leading, spacing: 13) { content }
+            .padding(18).frame(maxWidth: .infinity, alignment: .leading)
+            .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18))
+            .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.075)))
+    }
+}
+
+struct SettingsGroup<Content: View>: View {
+    let title: String
+    let caption: String?
+    let content: Content
+    init(_ title: String, caption: String? = nil, @ViewBuilder content: () -> Content) {
+        self.title = title; self.caption = caption; self.content = content()
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text(title).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary).padding(.leading, 8)
+            SettingsCard { content }
+            if let caption { Text(caption).font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 8).fixedSize(horizontal: false, vertical: true) }
+        }
+    }
+}
+
+struct SourceChoice: View {
+    let source: SourcePreference
+    let selected: Bool
+    let action: () -> Void
+    private var icon: NSImage? {
+        guard let id = source.source?.bundleIdentifier,
+              let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) else { return nil }
+        return NSWorkspace.shared.icon(forFile: url.path)
+    }
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 12) {
+                Text(source.title).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                Group {
+                    if let icon { Image(nsImage: icon).resizable().scaledToFit() }
+                    else { Image(systemName: source == .auto ? "sparkles" : "music.note").resizable().scaledToFit().padding(7) }
+                }.frame(width: 40, height: 40)
+                Circle().fill(selected ? Color.white : Color.clear).frame(width: 4, height: 4)
+            }.frame(maxWidth: .infinity).padding(.vertical, 16)
+                .background(.white.opacity(selected ? 0.12 : 0.025), in: RoundedRectangle(cornerRadius: 17))
+                .overlay(RoundedRectangle(cornerRadius: 17).stroke(.white.opacity(selected ? 0.28 : 0.05)))
+        }.buttonStyle(.plain).accessibilityLabel(source.title).accessibilityValue(selected ? "Selected" : "Not Selected")
+    }
+}
+
+// Cover motion uses the available static artwork; it does not pretend to fetch video covers.
+struct AnimatedAlbumCover: View {
+    let image: NSImage?
+    let size: CGFloat
+    let active: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var enlarged = false
+    private var moving: Bool { active && !reduceMotion }
+    var body: some View {
+        AlbumCover(image: image, size: size)
+            .scaleEffect(enlarged ? 1.04 : 1)
+            .rotationEffect(.degrees(moving ? (enlarged ? 1.2 : -1.2) : 0))
+            .animation(moving ? .easeInOut(duration: 2.5).repeatForever(autoreverses: true) : .default, value: enlarged)
+            .onAppear { enlarged = moving }
+            .onChange(of: moving) { _, value in enlarged = value }
+    }
+}
+
+@MainActor
+enum ArtworkPalette {
+    static func color(from image: NSImage?) -> Color {
+        guard let image, let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return .pink }
+        var pixels = [UInt8](repeating: 0, count: 12 * 12 * 4)
+        let success = pixels.withUnsafeMutableBytes { raw -> Bool in
+            guard let context = CGContext(data: raw.baseAddress, width: 12, height: 12,
+                bitsPerComponent: 8, bytesPerRow: 48, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.draw(cg, in: CGRect(x: 0, y: 0, width: 12, height: 12))
+            return true
+        }
+        guard success else { return .pink }
+        var red = 0.0, green = 0.0, blue = 0.0, weight = 0.0
+        for index in stride(from: 0, to: pixels.count, by: 4) {
+            let r = Double(pixels[index]) / 255, g = Double(pixels[index + 1]) / 255, b = Double(pixels[index + 2]) / 255
+            let importance = max(r, g, b) - min(r, g, b) + 0.05
+            red += r * importance; green += g * importance; blue += b * importance; weight += importance
+        }
+        let color = NSColor(srgbRed: red / weight, green: green / weight, blue: blue / weight, alpha: 1)
+        var hue: CGFloat = 0, saturation: CGFloat = 0, brightness: CGFloat = 0, alpha: CGFloat = 0
+        color.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha)
+        return Color(nsColor: NSColor(calibratedHue: hue, saturation: min(0.8, saturation), brightness: max(0.75, brightness), alpha: 1))
+    }
+}
+
+@MainActor
+enum FullscreenVisibility {
+    static func matches(window: CGRect, display: CGRect) -> Bool {
+        abs(window.minX - display.minX) < 3 && abs(window.minY - display.minY) < 3
+            && abs(window.width - display.width) < 3 && abs(window.height - display.height) < 3
+    }
+    static func covers(_ screen: NSScreen) -> Bool {
+        guard let id = MinnowDisplay.from(screen)?.nativeID,
+              let app = NSWorkspace.shared.frontmostApplication,
+              app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+              let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return false }
+        let bounds = CGDisplayBounds(id)
+        return windows.contains { value in
+            guard (value[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == app.processIdentifier,
+                  (value[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
+                  let raw = value[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: raw) else { return false }
+            return matches(window: frame, display: bounds)
+        }
     }
 }
