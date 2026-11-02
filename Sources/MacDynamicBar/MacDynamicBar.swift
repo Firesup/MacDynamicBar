@@ -941,23 +941,23 @@ struct IslandView: View {
     // MARK: Helpers
 
     private func playbackButton(
-        _ symbol: String,
-        label: String,
-        size: CGFloat,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(
-                    .system(size: size, weight: .semibold)
-                )
-                .frame(width: 44, height: 40)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(label)
-        .help(label)
+    _ symbol: String,
+    label: String,
+    size: CGFloat,
+    action: @escaping () -> Void
+) -> some View {
+    Button(action: action) {
+        Image(systemName: symbol)
+            .symbolRenderingMode(.monochrome)
+            .foregroundStyle(.white)
+            .font(.system(size: size, weight: .semibold))
+            .frame(width: 44, height: 40)
+            .contentShape(Rectangle())
     }
+    .buttonStyle(.plain)
+    .accessibilityLabel(label)
+    .help(label)
+}
 
     private func progress(at position: TimeInterval) -> CGFloat {
         guard player.duration > 0 else { return 0 }
@@ -2891,16 +2891,26 @@ final class AudioOutputs: ObservableObject {
 
 struct AudioOutputIcon: View {
     let device: AudioOutputDevice?
+
     var body: some View {
         Group {
-            if let device, let icon = device.nativeIcon,
+            if let device,
+               let icon = device.nativeIcon,
                !device.symbol.hasPrefix("airpods") {
-                Image(nsImage: icon).resizable().scaledToFit()
+                Image(nsImage: icon)
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
             } else {
-                Image(systemName: device?.symbol ?? "speaker.wave.2")
-                    .resizable().scaledToFit()
+                Image(
+                    systemName: device?.symbol ?? "speaker.wave.2"
+                )
+                .resizable()
+                .scaledToFit()
             }
-        }.frame(width: 20, height: 20)
+        }
+        .foregroundStyle(.white)
+        .frame(width: 20, height: 20)
     }
 }
 
@@ -3011,7 +3021,9 @@ final class ScrubSession: ObservableObject {
 
 struct PlaybackScrubber: View {
     @ObservedObject var player: MediaPlayer
+
     let isExpanded: Bool
+    var onEditingChange: (Bool) -> Void = { _ in }
 
     @StateObject private var session = ScrubSession()
 
@@ -3030,50 +3042,101 @@ struct PlaybackScrubber: View {
 
             let live = min(
                 maximum,
-                max(0, player.playbackPosition(at: context.date))
+                max(
+                    0,
+                    player.playbackPosition(at: context.date)
+                )
             )
 
             let displayed = session.draft ?? live
 
             HStack(spacing: 10) {
+                // Elapsed time.
                 Text(timeLabel(displayed))
                     .frame(width: 34, alignment: .leading)
 
-                Slider(
-                    value: Binding(
-                        get: {
-                            min(maximum, max(0, session.draft ?? live))
-                        },
-                        set: { value in
-                            begin(at: live)
-                            guard !session.cancelled else { return }
-                            session.draft = value
-                        }
-                    ),
-                    in: 0...maximum,
-                    onEditingChanged: { active in
-                        if active {
-                            begin(at: live)
-                        } else {
-                            finish()
-                        }
+                GeometryReader { geometry in
+                    ZStack(alignment: .leading) {
+                        // Full song length.
+                        Capsule()
+                            .fill(.white.opacity(0.18))
+
+                        // Elapsed portion.
+                        Capsule()
+                            .fill(.white)
+                            .frame(
+                                width: geometry.size.width * CGFloat(
+                                    min(
+                                        1,
+                                        max(0, displayed / maximum)
+                                    )
+                                )
+                            )
                     }
-                )
-                .controlSize(.mini)
-                .tint(.white.opacity(0.65))
-                .disabled(player.seekTarget == nil)
+                    .frame(height: 4)
+                    .frame(
+                        maxWidth: .infinity,
+                        maxHeight: .infinity
+                    )
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { value in
+                                guard player.seekTarget != nil else {
+                                    return
+                                }
+
+                                begin(at: live)
+
+                                updateDraft(
+                                    location: value.location.x,
+                                    width: geometry.size.width,
+                                    duration: maximum
+                                )
+                            }
+                            .onEnded { value in
+                                guard
+                                    session.editing,
+                                    !session.cancelled
+                                else {
+                                    reset()
+                                    return
+                                }
+
+                                updateDraft(
+                                    location: value.location.x,
+                                    width: geometry.size.width,
+                                    duration: maximum
+                                )
+
+                                finish()
+                            }
+                    )
+                }
+                .frame(height: 16)
+                .allowsHitTesting(player.seekTarget != nil)
+                .opacity(player.seekTarget == nil ? 0.35 : 1)
+                .accessibilityElement(children: .ignore)
                 .accessibilityLabel("Playback position")
                 .accessibilityValue(
-                    "\(timeLabel(displayed)) of \(timeLabel(player.duration))"
+                    "\(timeLabel(displayed)) of "
+                        + timeLabel(player.duration)
                 )
                 .accessibilityAdjustableAction { direction in
                     guard let target = player.seekTarget else {
                         return
                     }
 
-                    let delta: Double = direction == .increment
-                        ? 5
-                        : -5
+                    let delta: Double
+
+                    switch direction {
+                    case .increment:
+                        delta = 5
+                    case .decrement:
+                        delta = -5
+                    @unknown default:
+                        return
+                    }
 
                     player.seek(
                         to: player.playbackPosition(at: .now) + delta,
@@ -3081,6 +3144,7 @@ struct PlaybackScrubber: View {
                     )
                 }
 
+                // Remaining time.
                 Text(
                     "-" + timeLabel(
                         max(0, player.duration - displayed)
@@ -3100,7 +3164,7 @@ struct PlaybackScrubber: View {
             .frame(height: 16)
         }
         .onChange(of: player.seekTarget) { _, _ in
-            // Cancel if the song or source changes during a drag.
+            // Never apply a drag to a different song or source.
             if session.editing {
                 session.cancelled = true
                 session.draft = nil
@@ -3108,7 +3172,9 @@ struct PlaybackScrubber: View {
             }
         }
         .onChange(of: isExpanded) { _, expanded in
-            if !expanded { reset() }
+            if !expanded {
+                reset()
+            }
         }
         .onDisappear {
             reset()
@@ -3122,6 +3188,23 @@ struct PlaybackScrubber: View {
         session.cancelled = false
         session.target = player.seekTarget
         session.draft = position
+
+        onEditingChange(true)
+    }
+
+    private func updateDraft(
+        location: CGFloat,
+        width: CGFloat,
+        duration: Double
+    ) {
+        guard !session.cancelled else { return }
+
+        let fraction = min(
+            1,
+            max(0, location / max(1, width))
+        )
+
+        session.draft = Double(fraction) * duration
     }
 
     private func finish() {
@@ -3135,14 +3218,21 @@ struct PlaybackScrubber: View {
             return
         }
 
+        // Commit once when the mouse is released.
         player.seek(to: draft, expected: target)
     }
 
     private func reset() {
+        let wasEditing = session.editing
+
         session.editing = false
         session.cancelled = false
         session.draft = nil
         session.target = nil
+
+        if wasEditing {
+            onEditingChange(false)
+        }
     }
 
     private func timeLabel(_ seconds: Double) -> String {
