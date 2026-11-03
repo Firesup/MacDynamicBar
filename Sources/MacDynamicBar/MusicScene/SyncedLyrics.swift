@@ -50,7 +50,46 @@ enum SyncedLyrics {
   @Published private(set) var lines: [LyricLine] = []
   @Published private(set) var status = "Import an LRC file for the current track."
   private var track: MusicTrack?
+  private var request: LyricsRequest?
+  private var download: Task<Void, Never>?
+  func fetch(for track: MusicTrack?, duration: TimeInterval) {
+    guard let track, duration.isFinite, duration >= 1, duration <= 3600 else {
+      trackChanged(track)
+      return
+    }
+    let query = LyricsRequest(
+      title: track.title, artist: track.artist, album: track.album,
+      duration: Int(duration.rounded()))
+    guard request != query else { return }
+    clear()
+    self.track = track
+    request = query
+    status = "Finding lyrics…"
+    download = Task { @MainActor [weak self] in
+      do {
+        try await Task.sleep(for: .milliseconds(350))
+        let result = try await LRCLIBClient.shared.fetch(query)
+        guard let self, !Task.isCancelled, self.request == query else { return }
+        if let result {
+          self.lines = SyncedLyrics.parse(result.syncedLyrics ?? "")
+          self.status =
+            result.instrumental
+            ? "Instrumental"
+            : (self.lines.isEmpty ? "Synced lyrics unavailable" : "Lyrics · LRCLIB")
+        } else {
+          self.status = "No matching lyrics found"
+        }
+      } catch {
+        guard let self, !Task.isCancelled, self.request == query else { return }
+        self.status = "Lyrics unavailable · check connection"
+      }
+    }
+  }
+  func cancelOnline() { if request != nil { clear() } }
   func clear() {
+    download?.cancel()
+    download = nil
+    request = nil
     lines = []
     track = nil
     status = "Import an LRC file for the current track."
@@ -75,6 +114,7 @@ enum SyncedLyrics {
         status = "No timestamped LRC lines were found."
         return
       }
+      clear()
       self.track = track
       lines = parsed
       status = "Local synced lyrics"

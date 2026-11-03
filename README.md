@@ -137,3 +137,14 @@ The compact Notch header now has 12-point horizontal insets and wider automatic 
 Volume feedback observes Core Audio scalar/mute changes and refreshes during repeated key presses, without intercepting keys or suppressing Apple's HUD. Outputs without a readable master volume scalar are unsupported for now. Brightness is pending a separate adapter. Events has a volume-HUD preview.
 
 The earlier lockscreen feasibility conclusion is corrected in [LockscreenResearch.md](Docs/LockscreenResearch.md): a shielding-level NSPanel with `canBecomeVisibleWithoutLogin` has a demonstrated route to the real lockscreen. It still requires a dedicated opt-in prototype and hardware verification, especially for interactive controls. The existing unlocked Music Scene has not been relabelled as a working lockscreen.
+
+
+## Real lockscreen player development build
+
+See [LockScreenImplementation.md](Docs/LockScreenImplementation.md) for the exact implementation/verification status and remaining roadmap items.
+
+Settings → **Lock Screen → Lock Screen Player (Experimental)** enables an actual lock-state-driven overlay. The glass media card expands artwork when pressed and provides a lyrics toggle. **Online Lyrics · LRCLIB** is optional and sends track metadata to that service. **Open Music Scene Preview** remains an unlocked preview, separate from the real lockscreen panel.
+
+Additional controls include a battery widget, deadline timer, Calendar and Reminders connection/visibility controls, WeatherKit coordinate inputs, experimental brightness-key feedback and paired-AirPods connection. WeatherKit requires signed/provisioned capability support; the ad-hoc build is not provisioned for it. Nearby case discovery, per-bud battery, Focus, messaging/call adapters, notification history and actual WidgetKit extensions are unfinished. Do not interpret this build as completion of the full five-phase roadmap.
+
+No automated lock/password test has been performed. Disable other lockscreen overlays (e.g. Canopy) before comparing this build with the supplied reference. A true 1:1 match and actual locked-screen input routing must still be verified on hardware.

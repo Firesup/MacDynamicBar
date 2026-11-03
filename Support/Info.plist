@@ -17,6 +17,8 @@
     <string>Minnow measures music audio to animate the island waveform.</string>
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>Minnow detects AirPods connections to show a connection popup. It does not pair devices or scan for nearby devices.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key><string>Minnow shows upcoming events in widgets when you enable Calendar.</string>
+    <key>NSRemindersFullAccessUsageDescription</key><string>Minnow shows your reminder count when you enable Reminders.</string>
     <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>

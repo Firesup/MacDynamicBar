@@ -28,7 +28,7 @@ struct IslandPopupView: View {
             horizontal: false, vertical: true)
         if popup.kind == .hud, let percentage = popup.percentage {
           ProgressView(value: Double(percentage), total: 100).tint(.white)
-            .accessibilityLabel("Volume").accessibilityValue("\(percentage)%")
+            .accessibilityLabel(popup.title).accessibilityValue("\(percentage)%")
         } else if let percentage = popup.percentage {
           HStack(spacing: 3) {
             Image(

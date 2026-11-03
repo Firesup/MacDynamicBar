@@ -112,7 +112,16 @@ struct MusicSceneView: View {
       }
     }.foregroundStyle(.white).preferredColorScheme(.dark)
       .onAppear { if !state.isExpanded { state.toggle() } }
-      .onReceive(session.player.$track) { lyrics.trackChanged($0) }
+      .onReceive(session.player.$track) {
+        if settings.onlineLyrics {
+          lyrics.fetch(for: $0, duration: session.player.duration)
+        } else {
+          lyrics.trackChanged($0)
+        }
+      }
+      .onReceive(session.player.$duration) {
+        if settings.onlineLyrics { lyrics.fetch(for: session.player.track, duration: $0) }
+      }
       .animation(
         reduceMotion ? nil : .spring(response: 0.4, dampingFraction: 0.85), value: largeArtwork
       )
@@ -147,7 +156,7 @@ private struct ScenePlayerCard: View {
   }
 }
 
-private struct SceneGlass: View {
+struct SceneGlass: View {
   var body: some View {
     if #available(macOS 26, *) {
       Color.clear.glassEffect(.regular, in: RoundedRectangle(cornerRadius: 28))
@@ -157,16 +166,25 @@ private struct SceneGlass: View {
   }
 }
 
-private struct SceneArtwork: View {
+struct SceneArtwork: View {
   @ObservedObject var player: MediaPlayer
   var body: some View {
     GeometryReader { geometry in
-      AlbumCover(image: player.artwork, size: geometry.size.width).shadow(radius: 16)
+      Group {
+        if let image = player.artwork {
+          Image(nsImage: image).resizable().scaledToFill()
+        } else {
+          Image(systemName: "music.note").font(.system(size: 60)).frame(
+            maxWidth: .infinity, maxHeight: .infinity
+          ).background(.white.opacity(0.1))
+        }
+      }.frame(width: geometry.size.width, height: geometry.size.height)
+        .clipShape(RoundedRectangle(cornerRadius: 14)).shadow(radius: 16)
     }
   }
 }
 
-private struct SceneLyricsView: View {
+struct SceneLyricsView: View {
   @ObservedObject var player: MediaPlayer
   @ObservedObject var lyrics: LyricsStore
   var body: some View {

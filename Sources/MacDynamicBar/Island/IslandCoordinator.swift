@@ -10,9 +10,13 @@ final class IslandCoordinator {
   let popups = PopupCoordinator()
   let activities = ActivityStore()
   let sceneWidgets = MusicSceneWidgets()
+  let widgets = WidgetServices()
+  private lazy var lockScreen = LockScreenController(
+    session: session, settings: settings, widgets: widgets, readings: sceneWidgets)
   private var musicScene: MusicSceneWindow?
   let airPods = AirPodsMonitor()
   private let battery = BatteryMonitor()
+  private let brightnessHUD = BrightnessHUDMonitor()
   private let volumeHUD = VolumeHUDMonitor()
   private var started = false
   private var controllers: [CGDirectDisplayID: IslandWindowController] = [:]
@@ -29,6 +33,7 @@ final class IslandCoordinator {
     battery.onSnapshot = { [weak self] in
       self?.sceneWidgets.battery = $0
     }
+    brightnessHUD.onEvent = { [weak self] in self?.submit($0) }
     volumeHUD.onEvent = { [weak self] in self?.submit($0) }
 
     airPods.onEvent = { [weak self] event in self?.submit(event) }
@@ -59,6 +64,7 @@ final class IslandCoordinator {
       .store(in: &subscriptions)
     session.start()
     volumeHUD.start()
+    lockScreen.start()
     reconcileDisplays()
     applyEventSettings()
   }
@@ -76,6 +82,7 @@ final class IslandCoordinator {
 
   private func applyEventSettings() {
     guard started else { return }
+    if settings.brightnessHUD { brightnessHUD.start() } else { brightnessHUD.stop() }
     battery.lowEnabled = false
     battery.chargingEnabled = false
     if settings.lowBatteryPopups || settings.chargingPopups || settings.showActivities {
@@ -164,13 +171,23 @@ final class IslandCoordinator {
 
   func setSystemAwake(_ awake: Bool) {
     systemAwake = awake
-    if !awake { popups.clear() }
+    if !awake {
+      popups.clear()
+      lockScreen.suspend()
+    } else {
+      lockScreen.resume()
+    }
     reconcileDisplays()
   }
 
   func setSessionActive(_ active: Bool) {
     sessionActive = active
-    if !active { popups.clear() }
+    if !active {
+      popups.clear()
+      lockScreen.suspend()
+    } else {
+      lockScreen.resume()
+    }
     reconcileDisplays()
   }
 
@@ -187,10 +204,13 @@ final class IslandCoordinator {
   }
   func stop() {
     started = false
+    lockScreen.stop()
+    widgets.stop()
     activities.clear()
     musicScene?.close()
     battery.stop()
     volumeHUD.stop()
+    brightnessHUD.stop()
     airPods.stop()
     popups.clear()
     pauseTask?.cancel()

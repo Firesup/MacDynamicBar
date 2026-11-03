@@ -14,7 +14,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     case .playback: "Media"
     case .appearance: "Appearance"
     case .events: "Events"
-    case .musicScene: "Music Scene"
+    case .musicScene: "Lock Screen"
     }
   }
   var symbol: String {
@@ -252,10 +252,16 @@ struct MinnowSettingsView: View {
 
   private var musicSceneSettings: some View {
     SettingsGroup(
-      "Music Scene Preview",
+      "Lock Screen Player",
       caption:
-        "An unlocked-session reference implementation. This cannot replace the secure macOS lockscreen."
+        "Experimental player over the real macOS lockscreen. Native date/time and authentication remain handled by macOS. Enable, then lock your Mac to test."
     ) {
+      Toggle("Lock Screen Player (Experimental)", isOn: $settings.lockScreenPlayer)
+      Toggle("Online Lyrics · LRCLIB", isOn: $settings.onlineLyrics)
+      note(
+        "Online lyrics sends the current track title, artist, album and duration to lrclib.net. The lockscreen panel does not replace authentication. Turn it off here to disable it."
+      )
+      LockWidgetSettings(widgets: coordinator.widgets, settings: settings)
       Button("Open Music Scene Preview…") { coordinator.openMusicScene() }
       note(
         "Glass player, expandable album cover, shared playback controls, local synced LRC lyrics, clock and battery widgets."
@@ -282,6 +288,7 @@ struct MinnowSettingsView: View {
       ) {
         Toggle("AirPods Connections", isOn: $settings.airPodsPopups)
         AirPodsMonitorStatus(monitor: coordinator.airPods)
+        AirPodsConnectionsView()
         note(
           "Shows connections to this Mac. Connecting does not necessarily select the device as audio output."
         )
@@ -296,8 +303,9 @@ struct MinnowSettingsView: View {
           "Charging and low-battery alerts stay with macOS. Battery percentage is not a persistent island activity."
         )
         note(
-          "Volume changes appear in the island on outputs that expose Core Audio volume. Native macOS HUDs are not suppressed. Brightness integration is still pending."
+          "Volume changes appear in the island on outputs that expose Core Audio volume. Native macOS HUDs are not suppressed. Brightness key feedback is available experimentally on supported built-in displays. Native HUD suppression is not enabled."
         )
+        Toggle("Brightness Key HUD (Experimental)", isOn: $settings.brightnessHUD)
         Button("Preview Volume HUD") { coordinator.preview(.hud) }
       }
       SettingsGroup("Live Activities") {
@@ -639,5 +647,30 @@ private struct AirPodsMonitorStatus: View {
   var body: some View {
     Text(monitor.status).font(.caption).foregroundStyle(.secondary)
       .frame(maxWidth: .infinity, alignment: .leading)
+  }
+}
+
+private struct LockWidgetSettings: View {
+  @ObservedObject var widgets: WidgetServices
+  @ObservedObject var settings: MinnowSettings
+  var body: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      Toggle("Mac Battery", isOn: $settings.lockBattery)
+      Toggle("Weather", isOn: $settings.lockWeather)
+      HStack {
+        TextField("Latitude", text: $widgets.latitude)
+        TextField("Longitude", text: $widgets.longitude)
+      }
+      Button("Refresh Apple Weather") { widgets.refreshWeather() }
+      Text("Requires WeatherKit-enabled signing. " + widgets.weather).font(.caption)
+      Toggle("Calendar on Lock Screen", isOn: $settings.lockCalendar)
+      Button("Connect Calendar…") { widgets.connectCalendar() }
+      Toggle("Reminders on Lock Screen", isOn: $settings.lockReminders)
+      Button("Connect Reminders…") { widgets.connectReminders() }
+      HStack {
+        Button("Start 5-minute Timer") { widgets.timerEnd = .now.addingTimeInterval(300) }
+        Button("Stop Timer") { widgets.timerEnd = nil }
+      }
+    }
   }
 }

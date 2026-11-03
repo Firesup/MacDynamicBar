@@ -87,6 +87,15 @@ final class MinnowSettings: ObservableObject {
 
   @Published var popupDuration: Double { didSet { save("minnowPopupDuration", popupDuration) } }
   @Published var showActivities: Bool { didSet { save("minnowShowActivities", showActivities) } }
+  @Published var lockScreenPlayer: Bool {
+    didSet { save("minnowLockScreenPlayer", lockScreenPlayer) }
+  }
+  @Published var onlineLyrics: Bool { didSet { save("minnowOnlineLyrics", onlineLyrics) } }
+  @Published var lockBattery: Bool { didSet { save("lockBattery", lockBattery) } }
+  @Published var lockWeather: Bool { didSet { save("lockWeather", lockWeather) } }
+  @Published var lockCalendar: Bool { didSet { save("lockCalendar", lockCalendar) } }
+  @Published var lockReminders: Bool { didSet { save("lockReminders", lockReminders) } }
+  @Published var brightnessHUD: Bool { didSet { save("brightnessHUD", brightnessHUD) } }
   init(defaults: UserDefaults = .standard) {
     self.defaults = defaults
     func bool(_ key: String, _ fallback: Bool) -> Bool {
@@ -100,6 +109,13 @@ final class MinnowSettings: ObservableObject {
     lowBatteryPopups = bool("minnowLowBatteryPopups", true)
     popupDuration = number("minnowPopupDuration", 2, 1...10)
     showActivities = bool("minnowShowActivities", true)
+    lockScreenPlayer = bool("minnowLockScreenPlayer", false)
+    onlineLyrics = bool("minnowOnlineLyrics", false)
+    lockBattery = bool("lockBattery", true)
+    lockWeather = bool("lockWeather", false)
+    lockCalendar = bool("lockCalendar", false)
+    lockReminders = bool("lockReminders", false)
+    brightnessHUD = bool("brightnessHUD", false)
     chargingPopups = bool("minnowChargingPopups", true)
     showMenuBar = bool("showMinnowMenuBar", true)
     hideFullscreen = bool("hideMinnowFullscreen", false)
@@ -156,6 +172,13 @@ final class MinnowSettings: ObservableObject {
   }
 
   func resetPreferences() {
+    brightnessHUD = false
+    lockBattery = true
+    lockWeather = false
+    lockCalendar = false
+    lockReminders = false
+    lockScreenPlayer = false
+    onlineLyrics = false
     popupDuration = 2
     showActivities = true
     airPodsPopups = true
