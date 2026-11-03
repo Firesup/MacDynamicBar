@@ -8,6 +8,9 @@ final class IslandCoordinator {
   let settings: MinnowSettings
   let session = IslandMediaSession()
   let popups = PopupCoordinator()
+  let activities = ActivityStore()
+  let sceneWidgets = MusicSceneWidgets()
+  private var musicScene: MusicSceneWindow?
   let airPods = AirPodsMonitor()
   private let battery = BatteryMonitor()
   private var started = false
@@ -22,6 +25,10 @@ final class IslandCoordinator {
 
   init(settings: MinnowSettings) {
     self.settings = settings
+    battery.onSnapshot = { [weak self] in
+      self?.activities.updatePower($0)
+      self?.sceneWidgets.battery = $0
+    }
     battery.onEvent = { [weak self] event in self?.submit(event) }
     airPods.onEvent = { [weak self] event in self?.submit(event) }
     airPods.isSelectedForOutput = { [weak self] name in
@@ -29,6 +36,8 @@ final class IslandCoordinator {
       return self?.session.outputs.current?.name.localizedCaseInsensitiveCompare(name)
         == .orderedSame
     }
+    activities.$entries.receive(on: RunLoop.main).sink { [weak self] _ in self?.reconcileDisplays()
+    }.store(in: &subscriptions)
     popups.$active.receive(on: RunLoop.main).sink { [weak self] _ in
       self?.reconcileDisplays()
     }.store(in: &subscriptions)
@@ -37,6 +46,7 @@ final class IslandCoordinator {
   func start() {
     guard !started else { return }
     started = true
+    popups.displayDuration = settings.popupDuration
     session.apply(settings)
     settings.objectWillChange
       .debounce(for: .milliseconds(50), scheduler: RunLoop.main)
@@ -52,6 +62,7 @@ final class IslandCoordinator {
   }
 
   func applySettings() {
+    popups.displayDuration = settings.popupDuration
     session.apply(settings)
     if settings.islandEnabled && !previouslyEnabled { hiddenAfterPause = false }
     previouslyEnabled = settings.islandEnabled
@@ -65,7 +76,7 @@ final class IslandCoordinator {
     guard started else { return }
     battery.lowEnabled = settings.lowBatteryPopups
     battery.chargingEnabled = settings.chargingPopups
-    if settings.lowBatteryPopups || settings.chargingPopups {
+    if settings.lowBatteryPopups || settings.chargingPopups || settings.showActivities {
       battery.start()
       battery.refresh()
     } else {
@@ -86,6 +97,13 @@ final class IslandCoordinator {
     popups.submit(event)
   }
 
+  func openMusicScene() {
+    if musicScene == nil {
+      musicScene = MusicSceneWindow(session: session, settings: settings, widgets: sceneWidgets)
+    }
+    musicScene?.open()
+  }
+  func previewActivity() { activities.preview() }
   func preview(_ kind: IslandPopup.Kind) { submit(.preview(kind)) }
 
   private func updatePopupPolicy() {
@@ -99,7 +117,7 @@ final class IslandCoordinator {
   }
 
   func reconcileDisplays(reposition: Bool = false) {
-    guard started || popups.active != nil else {
+    guard started || popups.active != nil || activities.primary != nil else {
       controllers.values.forEach { $0.hide() }
       return
     }
@@ -111,13 +129,15 @@ final class IslandCoordinator {
     }
     let visible =
       settings.islandEnabled && sessionActive && systemAwake
-      && (popups.active != nil || (settings.mediaEnabled && !hiddenAfterPause))
+      && (popups.active != nil || (settings.showActivities && activities.primary != nil)
+        || (settings.mediaEnabled && !hiddenAfterPause))
     var anyVisible = false
     for screen in screens {
       guard let id = MinnowDisplay.from(screen)?.nativeID else { continue }
       if controllers[id] == nil {
         controllers[id] = IslandWindowController(
-          session: session, settings: settings, popups: popups, displayID: id)
+          session: session, settings: settings, popups: popups, activities: activities,
+          displayID: id)
         controllers[id]?.onInteractionChanged = { [weak self] in self?.updatePopupPolicy() }
       }
       guard let controller = controllers[id] else { continue }
@@ -165,6 +185,8 @@ final class IslandCoordinator {
   }
   func stop() {
     started = false
+    activities.clear()
+    musicScene?.close()
     battery.stop()
     airPods.stop()
     popups.clear()

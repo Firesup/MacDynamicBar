@@ -6,14 +6,15 @@ import SwiftUI
 // MARK: - Native Settings Window
 
 enum SettingsPage: String, CaseIterable, Identifiable {
-  case general, playback, appearance, events
+  case general, playback, appearance, events, musicScene
   var id: String { rawValue }
   var title: String {
     switch self {
     case .general: "General"
     case .playback: "Media"
     case .appearance: "Appearance"
-    case .events: "Popups"
+    case .events: "Events"
+    case .musicScene: "Music Scene"
     }
   }
   var symbol: String {
@@ -22,10 +23,12 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     case .playback: "play.fill"
     case .appearance: "paintpalette"
     case .events: "bell.badge"
+    case .musicScene: "moon.stars"
     }
   }
   var keywords: String {
     switch self {
+    case .musicScene: "lockscreen scene lyrics artwork clock widgets weather preview"
     case .events: "popups airpods headphones connection battery charging power preview alerts"
     case .general: "launch login startup display visibility fullscreen menu hover haptic reset"
     case .playback:
@@ -141,6 +144,7 @@ struct MinnowSettingsView: View {
               case .playback: playback
               case .appearance: appearance
               case .events: events
+              case .musicScene: musicSceneSettings
               }
             }
           }.padding(.horizontal, 28).padding(.bottom, 28)
@@ -246,6 +250,29 @@ struct MinnowSettingsView: View {
     }
   }
 
+  private var musicSceneSettings: some View {
+    SettingsGroup(
+      "Music Scene Preview",
+      caption:
+        "An unlocked-session reference implementation. This cannot replace the secure macOS lockscreen."
+    ) {
+      Button("Open Music Scene Preview…") { coordinator.openMusicScene() }
+      note(
+        "Glass player, expandable album cover, shared playback controls, local synced LRC lyrics, clock and battery widgets."
+      )
+      Divider()
+      note(
+        "Weather requires a configured provider. Focus and AirPods battery widgets require verified data sources. No sample readings are presented as live data."
+      )
+      note(
+        "Spotify provides no public lyrics endpoint. Import an LRC file for the current track from the scene toolbar. Lyrics clear when the track changes."
+      )
+      note(
+        "This window never requests a password or imitates Touch ID. Use the standard macOS Lock Screen to secure your Mac."
+      )
+    }
+  }
+
   private var events: some View {
     VStack(spacing: 20) {
       SettingsGroup(
@@ -279,7 +306,18 @@ struct MinnowSettingsView: View {
           Button("Preview Charging") { coordinator.preview(.charging) }
         }
       }
+      SettingsGroup("Live Activities") {
+        Toggle("Show Activities", isOn: $settings.showActivities)
+        note(
+          "Music takes the main island while playing; charging status moves to a side capsule. External apps’ mirrored activities are not imported."
+        )
+        Button("Preview Activity (30 seconds)") { coordinator.previewActivity() }
+      }
       SettingsGroup("Presentation") {
+        SettingsSlider(
+          title: "Collapse After", value: $settings.popupDuration, range: 1...10, suffix: "s")
+        Button("Preview Notification") { coordinator.preview(.notification) }
+
         note(
           "Popups dismiss automatically and restore the previous player. Critical battery alerts take priority. Scrubbing and the audio-output picker defer incoming events."
         )

@@ -11,15 +11,15 @@ import Testing
     .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent(
       ".build/ui-checks")
   try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-  for kind: IslandPopup.Kind in [.airPods, .lowBattery, .charging] {
+  for kind: IslandPopup.Kind in [.airPods, .lowBattery, .charging, .notification] {
     let popup = IslandPopup.preview(kind)
     #expect(NSImage(systemSymbolName: popup.symbol, accessibilityDescription: nil) != nil)
     let renderer = ImageRenderer(
       content: IslandPopupView(popup: popup, dismiss: {})
-        .frame(width: 320, height: 122).background(.black).preferredColorScheme(.dark))
+        .frame(width: 320, height: 88).background(.black).preferredColorScheme(.dark))
     renderer.scale = 2
     let image = try #require(renderer.cgImage)
-    #expect(image.width == 640 && image.height == 244)
+    #expect(image.width == 640 && image.height == 176)
     let representation = NSBitmapImageRep(cgImage: image)
     let png = try #require(representation.representation(using: .png, properties: [:]))
     try png.write(to: output.appendingPathComponent(kind.rawValue + ".png"))

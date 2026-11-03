@@ -85,7 +85,7 @@ import Testing
   #expect(notch.contains(CGPoint(x: 200, y: 100)))
   let compact = IslandShapeGeometry.path(
     size: CGSize(width: 232, height: 38), radius: 14, shape: .notch, expansion: 0)
-  #expect(!compact.contains(CGPoint(x: 1, y: 37.9)))
+  #expect(compact.contains(CGPoint(x: 8, y: 37.9)))
   let shoulder = IslandShapeGeometry.shoulder(size: size, expansion: 1)
   let glass = InsetGlassGeometry.frame(size: size, headerHeight: 38, sideInset: 10 + shoulder)
   #expect(glass.minX - shoulder == 10)
@@ -97,7 +97,7 @@ import Testing
   let defaults = try #require(UserDefaults(suiteName: suite))
   defer { defaults.removePersistentDomain(forName: suite) }
   let settings = MinnowSettings(defaults: defaults)
-  #expect(settings.islandShape == .applePill)
+  #expect(settings.islandShape == .notch)
   #expect(settings.appearanceLayout == .standard)
   settings.islandShape = .notch
   settings.appearanceLayout = .softGradient
@@ -106,7 +106,7 @@ import Testing
   #expect(restored.configuration.shape == .notch)
   #expect(restored.appearanceLayout == .softGradient)
   restored.resetPreferences()
-  #expect(restored.islandShape == .applePill)
+  #expect(restored.islandShape == .notch)
   #expect(restored.appearanceLayout == .standard)
   #expect(restored.slightHover)
 }
@@ -150,6 +150,6 @@ import Testing
   let restored = MinnowSettings(defaults: defaults)
   #expect(restored.opacity == 0.8)
   #expect(restored.gradientVisibility == 0.7)
-  #expect(restored.configuration.expandedWidth == 380)
-  #expect(restored.configuration.expandedContentHeight == 154)
+  #expect(restored.configuration.expandedWidth == 408)
+  #expect(restored.configuration.expandedContentHeight == 136)
 }

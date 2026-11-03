@@ -10,21 +10,27 @@ struct MusicView: View {
   @ObservedObject var settings: MinnowSettings
   @Environment(\.islandTextContrast) private var textContrast
 
+  var onArtworkPress: (() -> Void)? = nil
+
   // MARK: Expanded Player
 
   var body: some View {
-    VStack(spacing: 8) {
+    VStack(spacing: 5) {
       HStack(spacing: 10) {
         if settings.artwork {
-          AnimatedAlbumCover(
-            image: player.artwork, size: 46,
-            active: settings.animateArtwork && player.isPlaying && state.isExpanded)
+          if let onArtworkPress {
+            Button(action: onArtworkPress) { cover }.buttonStyle(.plain).accessibilityLabel(
+              "Expand album cover")
+          } else {
+            cover
+          }
+
         }
 
         VStack(alignment: .leading, spacing: 3) {
           HStack(spacing: 6) {
             Text(player.title)
-              .font(.system(size: 15, weight: .bold))
+              .font(.system(size: 14, weight: .semibold))
               .foregroundStyle(.white).lineLimit(1)
             if settings.explicitTag, accessories.isExplicit == true {
               Text("E").font(.system(size: 9, weight: .bold))
@@ -92,8 +98,14 @@ struct MusicView: View {
       }
     }
     .padding(.horizontal, settings.islandShape == .notch ? 30 : 20)
-    .padding(.vertical, 12)
+    .padding(.vertical, 7)
     .frame(maxWidth: .infinity)
+  }
+
+  private var cover: some View {
+    AnimatedAlbumCover(
+      image: player.artwork, size: 40,
+      active: settings.animateArtwork && player.isPlaying && state.isExpanded)
   }
 
   private var artistAndSource: some View {

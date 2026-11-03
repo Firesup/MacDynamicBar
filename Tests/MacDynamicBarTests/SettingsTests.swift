@@ -75,7 +75,7 @@ import Testing
   #expect(restored.notchWidthOffset == 14)
   #expect(!restored.showLeftButton)
   restored.automaticSizing = true
-  #expect(restored.configuration.expandedWidth == 380)
+  #expect(restored.configuration.expandedWidth == 408)
   restored.resetPreferences()
   let reset = MinnowSettings(defaults: defaults)
   #expect(reset.showMenuBar)

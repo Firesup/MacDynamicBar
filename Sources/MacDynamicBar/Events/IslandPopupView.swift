@@ -7,26 +7,31 @@ struct IslandPopupView: View {
   let dismiss: () -> Void
   @Environment(\.islandTextContrast) private var contrast
 
-  private var accent: Color { popup.kind == .lowBattery ? .orange : .green }
+  private var accent: Color {
+    popup.kind == .lowBattery ? .orange : (popup.kind == .notification ? .blue : .green)
+  }
 
   var body: some View {
     HStack(spacing: 12) {
       Image(systemName: popup.symbol)
         .symbolRenderingMode(.hierarchical)
-        .font(.system(size: popup.kind == .airPods ? 44 : 34, weight: .regular))
+        .font(.system(size: popup.kind == .airPods ? 32 : 28, weight: .regular))
         .foregroundStyle(popup.kind == .airPods ? .white : accent)
-        .frame(width: 56, height: 60)
+        .frame(width: 44, height: 44)
         .accessibilityHidden(true)
-      VStack(alignment: .leading, spacing: 6) {
-        Text(popup.title).font(.system(size: 16, weight: .bold)).lineLimit(1).minimumScaleFactor(
-          0.8)
+      VStack(alignment: .leading, spacing: 3) {
+        Text(popup.title).font(.system(size: 14, weight: .semibold)).lineLimit(1)
+          .minimumScaleFactor(
+            0.8)
         Text(popup.subtitle).font(.system(size: 12, weight: .semibold))
           .foregroundStyle(contrast.secondary).lineLimit(2).fixedSize(
             horizontal: false, vertical: true)
         if let percentage = popup.percentage {
-          HStack(spacing: 6) {
+          HStack(spacing: 3) {
             Image(
-              systemName: popup.kind == .charging ? "battery.100percent.bolt" : "battery.100percent"
+              systemName: popup.kind == .charging
+                ? "battery.100percent.bolt"
+                : (popup.kind == .lowBattery ? popup.symbol : "battery.100percent")
             )
             .foregroundStyle(accent)
             Text("\(percentage)%").monospacedDigit()

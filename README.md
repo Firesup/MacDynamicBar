@@ -42,7 +42,7 @@ Hide stops displaying the island and suspends waveform capture; it leaves the mu
 
 ## Settings
 
-The settings window follows the supplied 1:21 PM Canopy reference: dark sidebar, search, source tiles, rounded groups, and four pages.
+The settings window follows the supplied 1:21 PM Canopy reference: dark sidebar, search, source tiles, rounded groups, and five pages.
 
 - **General:** launch at login, open settings on launch, automatic/all/main/individual displays, enable island, hide in fullscreen, menu icon visibility, haptics, slight hover expansion (default), full-player hover expansion, reset preferences.
 - **Media:** media enable, Auto/Music/Spotify source cards, Heart/Shuffle/Repeat/None, cover visibility and motion, explicit badge/colour, heart colour from artwork, live waveform and retry, pause collapse, pause hiding (instant/delay/never), collapse after seeking, Spotify account.
@@ -66,7 +66,7 @@ Launch at login uses macOS ServiceManagement and needs the bundled app at a stab
 
 Playback controls have explicit white icons. The scrubber uses a muted full-length track and white elapsed bar. Dragging previews the position and seeks once on release; changing songs or sources cancels the drag. The output picker lists connected Mac audio outputs in a transient native popover. Clicking another app dismisses it and collapses the player; selecting an output also dismisses it.
 
-The automatic expanded size is now 380 × 154 points below the notch (previously 400 × 174). Artwork is 46 points; the title is 15-point bold and the artist row is 12-point semibold. Spacing and padding are tighter, while playback and output buttons retain their existing hit areas. Existing manual dimensions are preserved; use Automatic Sizing for the new defaults.
+The automatic expanded size is now 408 × 136 points below the notch (previously 400 × 174). Artwork is 40 points; the title is 14-point semibold and the artist row is 12-point semibold. Spacing and padding are tighter, while playback and output buttons retain their existing hit areas. Existing manual dimensions are preserved; use Automatic Sizing for the new defaults.
 
 ## Hover, contrast, shape, and links
 
@@ -86,7 +86,7 @@ Allow Automation access for the music applications when prompted. Audio-reactive
 
 `swift test` covers geometry, hover/pinning, delayed hover exit during scrubbing, persistent preferences/custom sizing, layout migration and switching, inset geometry around the camera, seek clamping/invalid input, default-versus-full hover, automatic contrast, Spotify URI encoding and stale-track metadata, connected-notch geometry, and output-picker state reset.
 
-Native compilation and 32 tests passed in this workspace. The app bundle and Info.plist were checked. The three popup contents were rendered offscreen and visually reviewed at the smallest supported width. A running Minnow instance was not replaced or relaunched, so end-to-end island UI checks remain unverified. Live player permissions, hardware output changes, Spotify account writes, fullscreen Spaces, and login registration also need a live desktop check.
+Native compilation and 36 default checks plus a separately enabled scene-render check passed in this workspace. The app bundle and Info.plist were checked. The three popup contents were rendered offscreen and visually reviewed at the smallest supported width. A running Minnow instance was not replaced or relaunched, so end-to-end island UI checks remain unverified. Live player permissions, hardware output changes, Spotify account writes, fullscreen Spaces, and login registration also need a live desktop check.
 
 ## Popups
 
@@ -95,7 +95,7 @@ Open **Settings → Popups** for AirPods Connections, Low Battery Alerts, Power 
 - **AirPods:** connection callbacks use IOBluetooth, with a short settling delay and per-device disconnect listeners. Existing connected devices are seeded silently on launch/wake. Duplicate callbacks and short reconnect storms do not repeat the popup. Recognition uses known Apple SDP device IDs when cached and AirPods names as a fallback; unrecognized or unusually renamed models may be missed. SF Symbols provide AirPods/Pro/Max artwork in an iOS-inspired popup; this is not Apple's private pairing sheet or its 3D animation. Connection status is separate from being selected as the Mac's audio output.
 - **AirPods battery:** not implemented in this stage. Real connection events show no percentage. The preview's 82% is sample data. Per-earbud/case percentages still need hardware investigation; no private API or guessed reading is used.
 - **Mac battery:** public IOKit power-source notifications; 20% and 10% alerts are emitted once per discharge cycle, including an initial low reading. Crossing both at once shows only the more urgent alert. External power resets the warnings. Plugging in reports the percentage and distinguishes charging from connected-but-not-charging. Launching already plugged in produces no connection popup. Invalid readings and desktop Macs produce none.
-- **Presentation:** one popup at a time, with a bounded priority queue. Low battery can preempt a connection/charging popup. Scrubbing or using the output selector defers incoming events; stale deferred events expire. Dismissal (automatic after 4–6 seconds, close button, header click, or outside click) restores the previous player presentation. Playback itself continues untouched.
+- **Presentation:** one popup at a time, with a bounded priority queue. Low battery can preempt a connection/charging popup. Scrubbing or using the output selector defers incoming events; stale deferred events expire. Dismissal (automatic after two seconds by default (configurable from 1–10 seconds), close button, header click, or outside click) restores the previous player presentation. Playback itself continues untouched.
 - **Visibility:** respects manual hiding, chosen displays, fullscreen hiding, sleep/session inactivity, and Reduce Motion. Hidden events are discarded rather than replayed later. Popups can appear independently of Media being disabled or hidden on pause, then restore the prior hidden media state. No new polling timer is used for device or power monitoring; one-shot tasks handle settling and dismissal.
 
 Bluetooth access may be requested for the bundled app. If connections are not detected, inspect **System Settings → Privacy & Security → Bluetooth** and the status shown on the Popups page. `--settings-preview` does not start the device monitors or playback; preview buttons can still show sample island content.
@@ -111,3 +111,20 @@ Bluetooth access may be requested for the bundled app. If connections are not de
 ## Manual check
 
 Open the built app and confirm the menu order and all three settings pages. Change sizing and opacity, close/reopen settings, and relaunch to confirm persistence. With a song playing, verify white transport icons, seeking, manual/Auto source selection, and output switching. Verify Hide/Show, hover, pause delays and display reconnects. Test launch at login after moving the app to a stable location.
+
+
+## Native surface iteration
+
+Branch: `feat/native-activity-surface`. See [implementation scope and staged plan](Docs/NativeSurfacePlan.md) for delivered behavior, platform limitations, reference links, and outstanding verification.
+
+- Select **Appearance → Island Shape → Notch** to keep connected shoulders in compact, hover, and expanded states. New installations default to Notch; saved explicit appearance choices are retained.
+- **Settings → Events** now includes **Collapse After** (two seconds by default), notification preview, activity visibility, and a clearly labelled activity preview. Mac charging is the first real activity source. Music stays primary while playing; charging appears in a separate side capsule. No other app's notifications or mirrored Live Activities are imported.
+- **Settings → Music Scene → Open Music Scene Preview…** opens the unlocked-session reference scene. Click the album cover or Expand Artwork; import a current-track LRC file and turn Lyrics on. macOS authentication and the secure lockscreen are not replaced. Weather remains unconnected, and AirPods/Focus data is not fabricated.
+
+Functional tests and popup snapshots run with the existing `swift test` command. The slower scene layout render is opt-in and should run separately from timing-sensitive hover tests:
+
+```sh
+MINNOW_RENDER_SCENE=1 swift test --filter musicSceneRendersWithoutStartingPlaybackOrDeviceMonitoring
+```
+
+Use the cache flags/environment from `scripts/build-app.sh` in restricted workspaces. The native scene's embedded AppKit controls and glass require a live window check; ImageRenderer snapshots do not fully render them.

@@ -7,6 +7,8 @@ import SwiftUI
 @MainActor
 final class IslandWindowController {
   private let panel = IslandPanel()
+  private let activities: ActivityStore
+  private let capsule = ActivityCapsule()
   private let popups: PopupCoordinator
   var onInteractionChanged: (() -> Void)?
   var isInteractionBusy: Bool { state.isInteractionBusy }
@@ -30,8 +32,10 @@ final class IslandWindowController {
 
   init(
     session: IslandMediaSession, settings: MinnowSettings, popups: PopupCoordinator,
+    activities: ActivityStore,
     displayID: CGDirectDisplayID
   ) {
+    self.activities = activities
     self.popups = popups
     self.settings = settings
     self.displayID = displayID
@@ -53,7 +57,8 @@ final class IslandWindowController {
     }.store(in: &subscriptions)
     player.$track.map { $0 != nil }.removeDuplicates().sink { [weak self] visible in
       guard let self, var layout = self.layout else { return }
-      layout.showsMiniPlayer = visible
+      layout.showsMiniPlayer =
+        visible || (self.settings.showActivities && self.activities.primary != nil)
       self.layout = layout
       self.updateRootView()
       self.resize(presentation: self.state.presentation)
@@ -65,6 +70,21 @@ final class IslandWindowController {
     }.store(in: &subscriptions)
     state.objectWillChange.receive(on: RunLoop.main).sink { [weak self] in
       self?.onInteractionChanged?()
+    }.store(in: &subscriptions)
+    activities.$entries.receive(on: RunLoop.main).sink { [weak self] _ in
+      guard let self else { return }
+      if var layout = self.layout {
+        layout.showsMiniPlayer =
+          self.player.track != nil
+          || (self.settings.showActivities && self.activities.primary != nil)
+        self.layout = layout
+        self.updateRootView()
+        self.resize(presentation: self.state.presentation)
+      }
+      self.updateActivityCapsule()
+    }.store(in: &subscriptions)
+    player.$isPlaying.receive(on: RunLoop.main).sink { [weak self] _ in
+      self?.updateActivityCapsule()
     }.store(in: &subscriptions)
     installMonitors()
   }
@@ -86,6 +106,7 @@ final class IslandWindowController {
       headerHeight: layout?.headerHeight ?? 28, shape: settings.islandShape,
       gradientVisibility: settings.gradientVisibility)
     if isShown && (changed || reposition) { show() }
+    updateActivityCapsule()
   }
 
   func toggleAudioReactiveWaves() {
@@ -114,13 +135,15 @@ final class IslandWindowController {
       screenFrame: screen.frame, notchWidth: max(80, notchWidth + settings.notchWidthOffset),
       notchHeight: max(
         20, (hasNotch ? screen.safeAreaInsets.top : 28) + settings.notchHeightOffset),
-      showsMiniPlayer: player.track != nil, notchCenterX: notchCenterX,
+      showsMiniPlayer: player.track != nil
+        || (settings.showActivities && activities.primary != nil), notchCenterX: notchCenterX,
       configuration: configuration)
     self.layout = layout
     hostingView?.stopAnimating()
     let root = IslandView(
       state: state, player: player, audio: audio,
-      accessories: accessories, outputs: outputs, popups: popups, settings: settings, layout: layout
+      accessories: accessories, outputs: outputs, popups: popups, activities: activities,
+      settings: settings, layout: layout
     )
     let host: IslandHostingView
     if let existing = hostingView {
@@ -159,6 +182,7 @@ final class IslandWindowController {
       to: surfaceSize(layout: layout, presentation: state.presentation),
       expanded: state.isExpanded || popups.active != nil, animated: false)
     panel.orderFrontRegardless()
+    updateActivityCapsule()
     updatePointer()
   }
 
@@ -169,6 +193,7 @@ final class IslandWindowController {
   }
 
   func hide() {
+    capsule.hide()
     isShown = false
     state.collapse()
     hostingView?.stopAnimating()
@@ -183,6 +208,7 @@ final class IslandWindowController {
     if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
     localMonitor = nil
     globalMonitor = nil
+    capsule.stop()
     panel.close()
   }
 
@@ -194,19 +220,32 @@ final class IslandWindowController {
     guard let layout else { return }
     hostingView?.host.rootView = IslandView(
       state: state, player: player, audio: audio,
-      accessories: accessories, outputs: outputs, popups: popups, settings: settings, layout: layout
+      accessories: accessories, outputs: outputs, popups: popups, activities: activities,
+      settings: settings, layout: layout
     )
   }
 
   private func surfaceSize(layout: IslandLayout, presentation: IslandPresentation) -> CGSize {
     guard popups.active != nil else { return layout.size(for: presentation) }
     var size = layout.size(for: .expanded)
-    size.height = min(size.height, layout.headerHeight + 122)
+    size.height = min(size.height, layout.headerHeight + 88)
     return size
+  }
+
+  private func updateActivityCapsule() {
+    guard isShown, settings.showActivities, settings.mediaEnabled, player.isPlaying,
+      popups.active == nil,
+      let activity = activities.primary, let layout, let screen = preferredScreen
+    else {
+      capsule.hide()
+      return
+    }
+    capsule.show(activity, beside: layout.frame(for: state.presentation), screen: screen.frame)
   }
 
   private func resize(presentation: IslandPresentation) {
     guard let layout else { return }
+    updateActivityCapsule()
     hostingView?.move(
       to: surfaceSize(layout: layout, presentation: presentation),
       expanded: presentation == .expanded || popups.active != nil,
@@ -227,6 +266,7 @@ final class IslandWindowController {
   }
 
   private func handleEvent(isClick: Bool, fromOtherApplication: Bool = false) {
+    if capsule.containsMouse { return }
     updatePointer()
     if popups.active != nil {
       if isClick, hostingView?.containsScreenPoint(NSEvent.mouseLocation) != true {

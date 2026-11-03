@@ -11,6 +11,7 @@ struct IslandView: View {
   @ObservedObject var accessories: PlayerAccessories
   @ObservedObject var outputs: AudioOutputs
   @ObservedObject var popups: PopupCoordinator
+  @ObservedObject var activities: ActivityStore
   @ObservedObject var settings: MinnowSettings
 
   let layout: IslandLayout
@@ -42,7 +43,17 @@ struct IslandView: View {
           IslandPopupView(popup: popup, dismiss: popups.dismiss)
             .frame(
               width: layout.size(for: .expanded).width,
-              height: min(122, layout.configuration.expandedContentHeight))
+              height: min(88, layout.configuration.expandedContentHeight))
+        } else if settings.showActivities, !player.isPlaying || !settings.mediaEnabled,
+          let activity = activities.primary
+        {
+          ActivityDetailView(activity: activity)
+            .frame(
+              width: layout.size(for: .expanded).width,
+              height: layout.configuration.expandedContentHeight
+            )
+            .opacity(state.isExpanded ? 1 : 0).allowsHitTesting(state.isExpanded)
+            .accessibilityHidden(!state.isExpanded)
         } else {
           MusicView(
             state: state, player: player, audio: audio, accessories: accessories,
@@ -74,7 +85,12 @@ struct IslandView: View {
     Button(action: { if popups.active != nil { popups.dismiss() } else { state.toggle() } }) {
       HStack(spacing: 0) {
         // Left section.
-        if popups.active == nil, !state.isExpanded, player.track != nil, settings.artwork {
+        if popups.active == nil, !state.isExpanded, settings.showActivities,
+          !player.isPlaying || !settings.mediaEnabled, let activity = activities.primary
+        {
+          Image(systemName: activity.symbol).font(.system(size: 13)).foregroundStyle(.green).frame(
+            maxWidth: .infinity)
+        } else if popups.active == nil, !state.isExpanded, player.track != nil, settings.artwork {
           AlbumCover(
             image: player.artwork,
             size: min(20, layout.notchHeight - 6)
@@ -91,10 +107,17 @@ struct IslandView: View {
 
         // Right section.
         Group {
-          if popups.active == nil, !state.isExpanded, player.track != nil {
+          if popups.active == nil, !state.isExpanded, player.track != nil, player.isPlaying,
+            settings.mediaEnabled
+          {
             PlaybackIndicator(
               isPlaying: player.isPlaying, audio: audio
             )
+          } else if settings.showActivities, !player.isPlaying || !settings.mediaEnabled,
+            let activity = activities.primary
+          {
+            Text(activity.compact).font(.system(size: 10, weight: .semibold)).monospacedDigit()
+              .lineLimit(1).foregroundStyle(.white)
           } else if state.isExpanded || popups.active != nil {
             Image(systemName: "chevron.up")
               .font(

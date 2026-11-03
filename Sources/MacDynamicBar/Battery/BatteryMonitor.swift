@@ -73,6 +73,7 @@ struct BatteryAlertPolicy {
 
 @MainActor
 final class BatteryMonitor {
+  var onSnapshot: ((MacBatterySnapshot) -> Void)?
   var onEvent: ((IslandPopup) -> Void)?
   var lowEnabled = true
   var chargingEnabled = true
@@ -103,6 +104,7 @@ final class BatteryMonitor {
 
   func refresh() {
     guard let snapshot = MacBatterySnapshot.read() else { return }
+    onSnapshot?(snapshot)
     for event in policy.update(snapshot, lowEnabled: lowEnabled, chargingEnabled: chargingEnabled) {
       onEvent?(event)
     }

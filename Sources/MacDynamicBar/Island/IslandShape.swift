@@ -15,7 +15,7 @@ struct IslandShapeGeometry {
   static func path(size: CGSize, radius: CGFloat, shape: IslandShape, expansion: Double) -> CGPath {
     let rect = CGRect(origin: .zero, size: size)
     let r = min(radius, size.height / 2, size.width / 2)
-    let s = shoulder(size: size, expansion: expansion)
+    let s = shoulder(size: size, expansion: max(0.55, expansion))
     guard shape == .notch, s > 0.01 else {
       return CGPath(roundedRect: rect, cornerWidth: r, cornerHeight: r, transform: nil)
     }

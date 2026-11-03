@@ -85,6 +85,8 @@ final class MinnowSettings: ObservableObject {
   }
   @Published var chargingPopups: Bool { didSet { save("minnowChargingPopups", chargingPopups) } }
 
+  @Published var popupDuration: Double { didSet { save("minnowPopupDuration", popupDuration) } }
+  @Published var showActivities: Bool { didSet { save("minnowShowActivities", showActivities) } }
   init(defaults: UserDefaults = .standard) {
     self.defaults = defaults
     func bool(_ key: String, _ fallback: Bool) -> Bool {
@@ -96,6 +98,8 @@ final class MinnowSettings: ObservableObject {
     }
     airPodsPopups = bool("minnowAirPodsPopups", true)
     lowBatteryPopups = bool("minnowLowBatteryPopups", true)
+    popupDuration = number("minnowPopupDuration", 2, 1...10)
+    showActivities = bool("minnowShowActivities", true)
     chargingPopups = bool("minnowChargingPopups", true)
     showMenuBar = bool("showMinnowMenuBar", true)
     hideFullscreen = bool("hideMinnowFullscreen", false)
@@ -115,11 +119,11 @@ final class MinnowSettings: ObservableObject {
     openSettingsOnLaunch = bool("openSettingsOnLaunch", true)
     automaticSizing = bool("automaticIslandSizing", true)
     compactWing = number("compactWingWidth", 26, 20...60)
-    expandedWidth = number("expandedIslandWidth", 380, 320...600)
-    expandedHeight = number("expandedIslandHeight", 154, 154...280)
+    expandedWidth = number("expandedIslandWidth", 408, 320...600)
+    expandedHeight = number("expandedIslandHeight", 136, 136...280)
     allDisplays = bool("islandOnAllDisplays", false)
     display = defaults.string(forKey: "islandDisplayUUID") ?? "automatic"
-    islandShape = IslandShape(rawValue: defaults.string(forKey: "islandShape") ?? "") ?? .applePill
+    islandShape = IslandShape(rawValue: defaults.string(forKey: "islandShape") ?? "") ?? .notch
     appearanceLayout =
       IslandAppearanceLayout(rawValue: defaults.string(forKey: "islandAppearanceLayout") ?? "")
       ?? .standard
@@ -152,6 +156,8 @@ final class MinnowSettings: ObservableObject {
   }
 
   func resetPreferences() {
+    popupDuration = 2
+    showActivities = true
     airPodsPopups = true
     lowBatteryPopups = true
     chargingPopups = true
@@ -160,15 +166,15 @@ final class MinnowSettings: ObservableObject {
     openSettingsOnLaunch = true
     automaticSizing = true
     compactWing = 26
-    expandedWidth = 380
-    expandedHeight = 154
+    expandedWidth = 408
+    expandedHeight = 136
     allDisplays = false
     display = "automatic"
     glass = false
     opacity = 1
     appearanceLayout = .standard
     gradientVisibility = 0.45
-    islandShape = .applePill
+    islandShape = .notch
     slightHover = true
     expandOnHover = false
     haptics = false

@@ -6,8 +6,8 @@ import Testing
 @Test func compactMatchesPhysicalNotchAndExpansionStaysAnchored() {
   let screen = CGRect(x: -1920, y: 120, width: 1920, height: 1080)
   let layout = IslandLayout(screenFrame: screen, notchWidth: 180, notchHeight: 38)
-  #expect(layout.size(for: .compact) == CGSize(width: 180, height: 38))
-  #expect(layout.size(for: .hover) == CGSize(width: 212, height: 46))
+  #expect(layout.size(for: .compact) == CGSize(width: 196, height: 38))
+  #expect(layout.size(for: .hover) == CGSize(width: 228, height: 46))
   for mode in [IslandPresentation.compact, .hover, .expanded] {
     let frame = layout.frame(for: mode)
     #expect(frame.midX == screen.midX)

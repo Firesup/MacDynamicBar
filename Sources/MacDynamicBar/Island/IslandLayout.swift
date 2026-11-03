@@ -22,7 +22,8 @@ struct IslandLayout {
       ? configuration.miniPlayerWingWidth * 2
       : 0
 
-    let compactWidth = notchWidth + wingsWidth
+    let shoulders: CGFloat = configuration.shape == .notch ? 16 : 0
+    let compactWidth = notchWidth + wingsWidth + shoulders
 
     let width: CGFloat
     let height: CGFloat

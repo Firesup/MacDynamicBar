@@ -231,7 +231,7 @@ final class IslandHostingView: NSView {
       // glass would prevent the inset from sampling the wallpaper.
       let shoulder =
         surfaceShape == .notch
-        ? IslandShapeGeometry.shoulder(size: size, expansion: expansionSpring.value) : 0
+        ? IslandShapeGeometry.shoulder(size: size, expansion: max(0.55, expansionSpring.value)) : 0
       let inset = InsetGlassGeometry.frame(
         size: size, headerHeight: headerHeight, sideInset: 10 + shoulder)
       let innerRadius = InsetGlassGeometry.cornerRadius(for: inset)

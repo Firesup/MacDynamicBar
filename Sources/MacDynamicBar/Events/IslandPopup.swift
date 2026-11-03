@@ -2,7 +2,7 @@ import Foundation
 
 /// Value-only presentation data. Event monitors never own windows or playback.
 struct IslandPopup: Identifiable, Equatable {
-  enum Kind: String { case lowBattery, charging, airPods }
+  enum Kind: String { case lowBattery, charging, airPods, notification }
   let id: UUID
   let kind: Kind
   let key: String
@@ -33,14 +33,19 @@ struct IslandPopup: Identifiable, Equatable {
     case .lowBattery: 100
     case .charging: 40
     case .airPods: 20
+    case .notification: 30
     }
   }
-  var duration: TimeInterval { kind == .lowBattery ? 6 : 4 }
+  var duration: TimeInterval { 2 }
   var lifetime: TimeInterval { kind == .lowBattery ? 30 : 15 }
   func isFresh(at date: Date) -> Bool { date.timeIntervalSince(createdAt) < lifetime }
 
   static func preview(_ kind: Kind) -> IslandPopup {
     switch kind {
+    case .notification:
+      IslandPopup(
+        kind: kind, key: "preview.notification", title: "Minnow",
+        subtitle: "Your activity is ready", symbol: "bell.fill", isPreview: true)
     case .airPods:
       IslandPopup(
         kind: kind, key: "preview.airpods", title: "AirPods Pro",

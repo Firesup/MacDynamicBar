@@ -12,6 +12,7 @@ final class PopupCoordinator: ObservableObject {
   private var busy = false
   private let clock: () -> Date
   private let automaticallyDismiss: Bool
+  var displayDuration: TimeInterval = 2
 
   init(clock: @escaping () -> Date = { .now }, automaticallyDismiss: Bool = true) {
     self.clock = clock
@@ -76,7 +77,8 @@ final class PopupCoordinator: ObservableObject {
     active = popup
     guard automaticallyDismiss else { return }
     dismissal = Task { @MainActor [weak self] in
-      do { try await Task.sleep(for: .seconds(popup.duration)) } catch { return }
+      do { try await Task.sleep(for: .seconds(min(10, max(1, self?.displayDuration ?? 2)))) } catch
+      { return }
       guard let self, self.active?.id == popup.id else { return }
       self.dismiss()
     }
