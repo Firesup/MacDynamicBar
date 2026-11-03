@@ -291,25 +291,19 @@ struct MinnowSettingsView: View {
         Divider()
         Button("Preview AirPods Connection") { coordinator.preview(.airPods) }
       }
-      SettingsGroup(
-        "Mac Battery",
-        caption:
-          "Low battery alerts appear once at 20% and 10% per discharge cycle. Desktop Macs do not generate battery alerts."
-      ) {
-        Toggle("Low Battery Alerts", isOn: $settings.lowBatteryPopups)
-        Divider()
-        Toggle("Power Connected", isOn: $settings.chargingPopups)
-        Divider()
-        HStack {
-          Button("Preview Low Battery") { coordinator.preview(.lowBattery) }
-          Spacer()
-          Button("Preview Charging") { coordinator.preview(.charging) }
-        }
+      SettingsGroup("System Feedback") {
+        note(
+          "Charging and low-battery alerts stay with macOS. Battery percentage is not a persistent island activity."
+        )
+        note(
+          "Volume changes appear in the island on outputs that expose Core Audio volume. Native macOS HUDs are not suppressed. Brightness integration is still pending."
+        )
+        Button("Preview Volume HUD") { coordinator.preview(.hud) }
       }
       SettingsGroup("Live Activities") {
         Toggle("Show Activities", isOn: $settings.showActivities)
         note(
-          "Music takes the main island while playing; charging status moves to a side capsule. External apps’ mirrored activities are not imported."
+          "Music takes the main island while playing. Battery and charging are not persistent activities. External apps’ mirrored activities are not imported."
         )
         Button("Preview Activity (30 seconds)") { coordinator.previewActivity() }
       }

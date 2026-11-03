@@ -23,13 +23,17 @@ final class PopupCoordinator: ObservableObject {
     let now = clock()
     guard allowed, popup.isFresh(at: now) else { return }
     recent = recent.filter { now.timeIntervalSince($0.value) < 10 }
-    if !popup.isPreview, recent[popup.key] != nil { return }
+    if popup.kind != .hud, !popup.isPreview, recent[popup.key] != nil { return }
     recent[popup.key] = now
     pending.removeAll { $0.key == popup.key || !$0.isFresh(at: now) }
     if let active, popup.priority > active.priority, !busy {
       // Superseded information is dropped, rather than replayed after a critical alert.
       dismissal?.cancel()
       self.active = nil
+    }
+    if popup.kind == .hud, active?.key == popup.key {
+      dismissal?.cancel()
+      active = nil
     }
     pending.append(popup)
     pending.sort {

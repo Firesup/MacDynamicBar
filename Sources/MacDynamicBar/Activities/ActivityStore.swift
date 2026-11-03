@@ -16,16 +16,6 @@ struct IslandActivity: Identifiable, Equatable {
   var primary: IslandActivity? { entries.first }
   private var previewTask: Task<Void, Never>?
 
-  func updatePower(_ snapshot: MacBatterySnapshot) {
-    entries.removeAll { $0.id == "mac.power" }
-    if snapshot.onExternalPower {
-      entries.append(
-        IslandActivity(
-          id: "mac.power", title: "Mac Battery",
-          detail: snapshot.charging ? "Charging" : "Connected · Not charging",
-          compact: "\(snapshot.percentage)%", symbol: "battery.100percent.bolt"))
-    }
-  }
   func preview() {
     previewTask?.cancel()
     entries.removeAll { $0.isPreview }

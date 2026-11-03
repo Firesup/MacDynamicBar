@@ -128,3 +128,12 @@ MINNOW_RENDER_SCENE=1 swift test --filter musicSceneRendersWithoutStartingPlayba
 ```
 
 Use the cache flags/environment from `scripts/build-app.sh` in restricted workspaces. The native scene's embedded AppKit controls and glass require a live window check; ImageRenderer snapshots do not fully render them.
+
+
+## Compact spacing, HUDs, and revised lockscreen research
+
+The compact Notch header now has 12-point horizontal insets and wider automatic wings so artwork and waveforms have breathing room. The activity capsule is 88 × 26 points (previously 116 × 30). Persistent battery/charging activities are removed; macOS handles low-battery and charging alerts. Battery readings still support the separate music-scene widget.
+
+Volume feedback observes Core Audio scalar/mute changes and refreshes during repeated key presses, without intercepting keys or suppressing Apple's HUD. Outputs without a readable master volume scalar are unsupported for now. Brightness is pending a separate adapter. Events has a volume-HUD preview.
+
+The earlier lockscreen feasibility conclusion is corrected in [LockscreenResearch.md](Docs/LockscreenResearch.md): a shielding-level NSPanel with `canBecomeVisibleWithoutLogin` has a demonstrated route to the real lockscreen. It still requires a dedicated opt-in prototype and hardware verification, especially for interactive controls. The existing unlocked Music Scene has not been relabelled as a working lockscreen.

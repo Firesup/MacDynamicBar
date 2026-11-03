@@ -130,6 +130,7 @@ struct IslandView: View {
         }
         .frame(maxWidth: .infinity)
       }
+      .padding(.horizontal, settings.islandShape == .notch ? 12 : 6)
       .frame(height: headerHeight)
       .contentShape(Rectangle())
     }

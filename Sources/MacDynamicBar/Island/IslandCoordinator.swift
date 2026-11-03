@@ -13,6 +13,7 @@ final class IslandCoordinator {
   private var musicScene: MusicSceneWindow?
   let airPods = AirPodsMonitor()
   private let battery = BatteryMonitor()
+  private let volumeHUD = VolumeHUDMonitor()
   private var started = false
   private var controllers: [CGDirectDisplayID: IslandWindowController] = [:]
   private var subscriptions = Set<AnyCancellable>()
@@ -26,10 +27,10 @@ final class IslandCoordinator {
   init(settings: MinnowSettings) {
     self.settings = settings
     battery.onSnapshot = { [weak self] in
-      self?.activities.updatePower($0)
       self?.sceneWidgets.battery = $0
     }
-    battery.onEvent = { [weak self] event in self?.submit(event) }
+    volumeHUD.onEvent = { [weak self] in self?.submit($0) }
+
     airPods.onEvent = { [weak self] event in self?.submit(event) }
     airPods.isSelectedForOutput = { [weak self] name in
       guard !name.isEmpty else { return false }
@@ -57,6 +58,7 @@ final class IslandCoordinator {
       .sink { [weak self] _ in self?.playbackChanged() }
       .store(in: &subscriptions)
     session.start()
+    volumeHUD.start()
     reconcileDisplays()
     applyEventSettings()
   }
@@ -74,8 +76,8 @@ final class IslandCoordinator {
 
   private func applyEventSettings() {
     guard started else { return }
-    battery.lowEnabled = settings.lowBatteryPopups
-    battery.chargingEnabled = settings.chargingPopups
+    battery.lowEnabled = false
+    battery.chargingEnabled = false
     if settings.lowBatteryPopups || settings.chargingPopups || settings.showActivities {
       battery.start()
       battery.refresh()
@@ -188,6 +190,7 @@ final class IslandCoordinator {
     activities.clear()
     musicScene?.close()
     battery.stop()
+    volumeHUD.stop()
     airPods.stop()
     popups.clear()
     pauseTask?.cancel()

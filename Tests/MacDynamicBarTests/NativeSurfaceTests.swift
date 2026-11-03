@@ -19,12 +19,6 @@ import Testing
 
 @Test @MainActor func activitiesFollowPowerAndDoNotFabricatePercentages() {
   let store = ActivityStore()
-  store.updatePower(MacBatterySnapshot(percentage: 45, onExternalPower: true, charging: true))
-  #expect(store.primary?.compact == "45%")
-  store.updatePower(MacBatterySnapshot(percentage: 46, onExternalPower: true, charging: false))
-  #expect(store.entries.count == 1)
-  #expect(store.primary?.detail == "Connected · Not charging")
-  store.updatePower(MacBatterySnapshot(percentage: 46, onExternalPower: false, charging: false))
   #expect(store.entries.isEmpty)
   store.preview()
   #expect(store.primary?.isPreview == true)
@@ -58,4 +52,18 @@ import Testing
   let restored = MinnowSettings(defaults: defaults)
   #expect(restored.popupDuration == 5)
   #expect(!restored.showActivities)
+}
+
+@Test @MainActor func volumeHUDRefreshesDuringRapidChanges() {
+  let popups = PopupCoordinator(automaticallyDismiss: false)
+  popups.submit(
+    IslandPopup(
+      kind: .hud, key: "hud.volume", title: "Volume", subtitle: "", symbol: "speaker.wave.2.fill",
+      percentage: 20))
+  popups.submit(
+    IslandPopup(
+      kind: .hud, key: "hud.volume", title: "Volume", subtitle: "", symbol: "speaker.wave.2.fill",
+      percentage: 40))
+  #expect(popups.active?.percentage == 40)
+  #expect(popups.pending.isEmpty)
 }

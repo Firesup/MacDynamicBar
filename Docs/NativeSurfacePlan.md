@@ -1,5 +1,7 @@
 # Native activity surface and music scene
 
+> Update: the lockscreen feasibility restriction below is superseded by [LockscreenResearch.md](LockscreenResearch.md). A real lockscreen overlay route has been identified. Persistent battery activities were also removed; macOS handles power alerts, and Minnow now observes volume changes for HUD feedback.
+
 ## Product boundary
 
 Minnow is moving toward a unified event/activity surface. This iteration does not replace macOS Notification Center, import every app's notifications, take ownership of mirrored ActivityKit activities, suppress Apple's system indicators, or replace the secure login/lock screen. Those are different integrations from drawing a similar interface.

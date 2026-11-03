@@ -9,7 +9,7 @@ struct IslandConfiguration: Equatable {
   var shape: IslandShape = .notch
 
   // Space on each side of the physical notch when displaying music.
-  var miniPlayerWingWidth: CGFloat = 26
+  var miniPlayerWingWidth: CGFloat = 38
 
   var hoverWidthIncrease: CGFloat = 32
   var hoverHeightIncrease: CGFloat = 8

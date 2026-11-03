@@ -18,7 +18,7 @@ struct ActivityDetailView: View {
   private let panel = IslandPanel()
   private var activity: IslandActivity?
   func show(_ activity: IslandActivity, beside frame: CGRect, screen: CGRect) {
-    guard frame.maxX + 8 + 116 <= screen.maxX else {
+    guard frame.maxX + 8 + 88 <= screen.maxX else {
       hide()
       return
     }
@@ -27,7 +27,7 @@ struct ActivityDetailView: View {
       panel.contentView = NSHostingView(rootView: CapsuleContent(activity: activity))
     }
     panel.setFrame(
-      CGRect(x: frame.maxX + 8, y: frame.maxY - 30, width: 116, height: 30), display: true)
+      CGRect(x: frame.maxX + 8, y: frame.maxY - 26, width: 88, height: 26), display: true)
     panel.ignoresMouseEvents = false
     panel.orderFrontRegardless()
   }
@@ -43,9 +43,9 @@ private struct CapsuleContent: View {
     Button {
       expanded.toggle()
     } label: {
-      HStack(spacing: 6) {
+      HStack(spacing: 5) {
         Image(systemName: activity.symbol).foregroundStyle(.green)
-        Text(activity.compact).font(.system(size: 11, weight: .semibold)).monospacedDigit()
+        Text(activity.compact).font(.system(size: 10, weight: .semibold)).monospacedDigit()
       }.foregroundStyle(.white).frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.black, in: Capsule()).contentShape(Capsule())
     }.buttonStyle(.plain).help(activity.title + " · " + activity.detail)
