@@ -47,6 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var settingsWindow: MinnowSettingsWindow?
     private var statusItem: NSStatusItem?
     private var menuSubscription: AnyCancellable?
+    private var presentationObservation: NSKeyValueObservation?
     private var observers: [(center: NotificationCenter, token: NSObjectProtocol)] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -55,6 +56,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsWindow = MinnowSettingsWindow(settings: settings, coordinator: coordinator)
         configureMenu()
         configureApplicationMenu()
+        presentationObservation = NSApp.observe(\.currentSystemPresentationOptions, options: [.new]) { [weak self] _, _ in
+            Task { @MainActor [weak self] in self?.island?.refreshVisibility() }
+        }
         menuSubscription = settings.$showMenuBar.receive(on: RunLoop.main).sink { [weak self] visible in
             self?.statusItem?.isVisible = visible
         }
@@ -190,6 +194,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 /// Dimensions are measured in macOS points.
 struct IslandConfiguration: Equatable {
     var hoverEnabled = true
+    var shape: IslandShape = .applePill
 
     // Space on each side of the physical notch when displaying music.
     var miniPlayerWingWidth: CGFloat = 26
@@ -197,8 +202,8 @@ struct IslandConfiguration: Equatable {
     var hoverWidthIncrease: CGFloat = 32
     var hoverHeightIncrease: CGFloat = 8
 
-    var expandedWidth: CGFloat = 400
-    var expandedContentHeight: CGFloat = 174
+    var expandedWidth: CGFloat = 380
+    var expandedContentHeight: CGFloat = 154
 
 }
 
@@ -436,6 +441,9 @@ final class IslandHostingView: NSView {
     private var widthSpring = SurfaceSpring(value: 1, target: 1)
     private var heightSpring = SurfaceSpring(value: 1, target: 1)
     private var cornerSpring = SurfaceSpring(value: 14, target: 14)
+    private var expansionSpring = SurfaceSpring(value: 0, target: 0)
+    private let gradientSurface = CAGradientLayer()
+    private var surfaceShape: IslandShape = .applePill
     private var ticker: Timer?
     private var lastTick = 0.0
     private var surfacePath = CGPath(rect: .zero, transform: nil)
@@ -444,6 +452,14 @@ final class IslandHostingView: NSView {
     private let surface = NSView()
     private let backdrop: NSView
     private let blurBackdrop = NSVisualEffectView(frame: .zero)
+    private let blackShell = CAShapeLayer()
+    private let insetFinish = NSView()
+    private var appearanceLayout: IslandAppearanceLayout = .standard
+    private var usesGlass = false
+    private var usesBlur = false
+    private var backgroundOpacity = 1.0
+    private var gradientVisibility = 0.45
+    private var headerHeight: CGFloat = 28
 
     init(rootView: IslandView) {
         host = NSHostingView(rootView: rootView)
@@ -463,6 +479,15 @@ final class IslandHostingView: NSView {
         surface.wantsLayer = true
         surface.layer?.backgroundColor = NSColor.black.cgColor
         surface.layer?.mask = surfaceMask
+        gradientSurface.isHidden = true
+        gradientSurface.startPoint = CGPoint(x: 0.5, y: 1)
+        gradientSurface.endPoint = CGPoint(x: 0.5, y: 0)
+        gradientSurface.locations = [0, 0.3, 1]
+        surface.layer?.addSublayer(gradientSurface)
+        blackShell.fillColor = NSColor.black.cgColor
+        blackShell.fillRule = .evenOdd
+        blackShell.isHidden = true
+        surface.layer?.addSublayer(blackShell)
         backdrop.isHidden = true
         host.sizingOptions = []
         host.wantsLayer = true
@@ -473,20 +498,26 @@ final class IslandHostingView: NSView {
         blurBackdrop.isHidden = true
         surface.addSubview(blurBackdrop)
         surface.addSubview(backdrop)
+        insetFinish.wantsLayer = true
+        insetFinish.isHidden = true
+        insetFinish.layer?.borderWidth = 0.75
+        insetFinish.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
+        insetFinish.layer?.masksToBounds = true
+        surface.addSubview(insetFinish)
         surface.addSubview(host)
         addSubview(surface)
     }
 
-    func applyAppearance(glass: Bool, blur: Bool, opacity: Double) {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        backdrop.isHidden = !glass
-        backdrop.alphaValue = opacity
-        blurBackdrop.isHidden = glass || !blur
-        blurBackdrop.alphaValue = opacity
-        surface.layer?.backgroundColor = NSColor.black.withAlphaComponent(
-            (glass || blur) ? max(0.1, opacity * 0.18) : opacity).cgColor
-        CATransaction.commit()
+    func applyAppearance(layout: IslandAppearanceLayout, glass: Bool, blur: Bool,
+                         opacity: Double, headerHeight: CGFloat, shape: IslandShape, gradientVisibility: Double) {
+        surfaceShape = shape
+        appearanceLayout = layout
+        usesGlass = glass
+        usesBlur = blur
+        backgroundOpacity = opacity
+        self.gradientVisibility = gradientVisibility
+        self.headerHeight = headerHeight
+        applySurface()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
@@ -496,11 +527,13 @@ final class IslandHostingView: NSView {
         widthSpring.target = size.width
         heightSpring.target = size.height
         cornerSpring.target = expanded ? 32 : 14
+        expansionSpring.target = expanded ? 1 : 0
         if !animated {
             stopAnimating()
             widthSpring.finish()
             heightSpring.finish()
             cornerSpring.finish()
+            expansionSpring.finish()
             applySurface()
             return
         }
@@ -546,10 +579,12 @@ final class IslandHostingView: NSView {
         widthSpring.advance(by: dt)
         heightSpring.advance(by: dt)
         cornerSpring.advance(by: dt)
-        if widthSpring.settled && heightSpring.settled && cornerSpring.settled {
+        expansionSpring.advance(by: dt)
+        if widthSpring.settled && heightSpring.settled && cornerSpring.settled && expansionSpring.settled {
             widthSpring.finish()
             heightSpring.finish()
             cornerSpring.finish()
+            expansionSpring.finish()
             stopAnimating()
         }
         applySurface()
@@ -561,14 +596,79 @@ final class IslandHostingView: NSView {
         surfaceRect = CGRect(x: (bounds.width - size.width) / 2,
                              y: 0, width: size.width, height: size.height)
         let radius = min(cornerSpring.value, size.height / 2, size.width / 2)
-        surfacePath = CGPath(roundedRect: CGRect(origin: .zero, size: size),
-                             cornerWidth: radius, cornerHeight: radius,
-                             transform: nil)
+        surfacePath = IslandShapeGeometry.path(size: size, radius: radius,
+                                              shape: surfaceShape, expansion: expansionSpring.value)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         surface.frame = surfaceRect
         host.frame = CGRect(origin: .zero, size: size)
-        backdrop.frame = CGRect(origin: .zero, size: size)
+        let whole = CGRect(origin: .zero, size: size)
+        blackShell.frame = whole
+        gradientSurface.frame = whole
+        gradientSurface.isHidden = appearanceLayout != .softGradient
+        if appearanceLayout == .softGradient {
+            blackShell.isHidden = true
+            insetFinish.isHidden = true
+            backdrop.isHidden = true
+            blurBackdrop.isHidden = true
+            surface.layer?.backgroundColor = NSColor.clear.cgColor
+            // Fade black into the real desktop, rather than painting an opaque gray.
+            let lowerAlpha = SoftGradientAppearance.bottomOpacity(
+                visibility: gradientVisibility, expansion: expansionSpring.value,
+                reduceTransparency: NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency)
+            let headerStop = min(0.95, headerHeight / max(1, size.height))
+            gradientSurface.locations = [0, NSNumber(value: Double(headerStop)), 1]
+            gradientSurface.colors = [NSColor.black.cgColor,
+                NSColor.black.cgColor, NSColor.black.withAlphaComponent(lowerAlpha).cgColor]
+        } else if appearanceLayout == .glassInset {
+            // The shell has a real cutout. An opaque black backing behind the
+            // glass would prevent the inset from sampling the wallpaper.
+            let shoulder = surfaceShape == .notch ? IslandShapeGeometry.shoulder(size: size, expansion: expansionSpring.value) : 0
+            let inset = InsetGlassGeometry.frame(size: size, headerHeight: headerHeight, sideInset: 10 + shoulder)
+            let innerRadius = InsetGlassGeometry.cornerRadius(for: inset)
+            let shellPath = CGMutablePath()
+            shellPath.addRect(whole)
+            if !inset.isEmpty {
+                shellPath.addRoundedRect(in: inset, cornerWidth: innerRadius, cornerHeight: innerRadius)
+            }
+            blackShell.path = shellPath
+            blackShell.isHidden = false
+            surface.layer?.backgroundColor = NSColor.clear.cgColor
+            backdrop.frame = inset
+            backdrop.isHidden = inset.isEmpty
+            backdrop.alphaValue = 1
+            blurBackdrop.isHidden = true
+            insetFinish.frame = inset
+            insetFinish.isHidden = inset.isEmpty
+            insetFinish.layer?.cornerRadius = innerRadius
+            insetFinish.layer?.backgroundColor = NSColor.black.withAlphaComponent(
+                0.08 + backgroundOpacity * 0.20).cgColor
+            if #available(macOS 26.0, *), let glass = backdrop as? NSGlassEffectView {
+                glass.cornerRadius = innerRadius
+                glass.style = .regular
+                glass.tintColor = NSColor.black.withAlphaComponent(0.12 + backgroundOpacity * 0.28)
+            } else {
+                backdrop.wantsLayer = true
+                backdrop.layer?.cornerRadius = innerRadius
+                backdrop.layer?.masksToBounds = true
+            }
+        } else {
+            blackShell.isHidden = true
+            insetFinish.isHidden = true
+            backdrop.frame = whole
+            backdrop.isHidden = !usesGlass
+            backdrop.alphaValue = backgroundOpacity
+            blurBackdrop.isHidden = usesGlass || !usesBlur
+            blurBackdrop.alphaValue = backgroundOpacity
+            surface.layer?.backgroundColor = NSColor.black.withAlphaComponent(
+                (usesGlass || usesBlur) ? max(0.1, backgroundOpacity * 0.18) : backgroundOpacity).cgColor
+            if #available(macOS 26.0, *), let glass = backdrop as? NSGlassEffectView {
+                glass.cornerRadius = 0
+                glass.tintColor = nil
+            } else {
+                backdrop.layer?.cornerRadius = 0
+            }
+        }
         blurBackdrop.frame = CGRect(origin: .zero, size: size)
         surfaceMask.frame = CGRect(origin: .zero, size: size)
         surfaceMask.path = surfacePath
@@ -609,8 +709,8 @@ final class IslandWindowController {
         self.outputs = session.outputs
         self.audio = session.audio
         self.configuration = settings.configuration
-        self.state = IslandState(hoverEnabled: settings.expandOnHover)
-        self.state.configureHover(enabled: settings.expandOnHover, opensPlayer: true)
+        self.state = IslandState(hoverEnabled: settings.slightHover || settings.expandOnHover)
+        self.state.configureHover(enabled: settings.slightHover || settings.expandOnHover, opensPlayer: settings.expandOnHover)
         self.state.onToggle = { [weak settings] in
             if settings?.haptics == true {
                 NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
@@ -638,8 +738,10 @@ final class IslandWindowController {
         let changed = configuration != settings.configuration || tuning != nextTuning
         tuning = nextTuning
         configuration = settings.configuration
-        state.configureHover(enabled: settings.expandOnHover, opensPlayer: true)
-        hostingView?.applyAppearance(glass: settings.glass, blur: settings.backgroundBlur, opacity: settings.opacity)
+        state.configureHover(enabled: settings.slightHover || settings.expandOnHover, opensPlayer: settings.expandOnHover)
+        hostingView?.applyAppearance(layout: settings.appearanceLayout, glass: settings.glass,
+                                     blur: settings.backgroundBlur, opacity: settings.opacity,
+                                     headerHeight: layout?.headerHeight ?? 28, shape: settings.islandShape, gradientVisibility: settings.gradientVisibility)
         if isShown && (changed || reposition) { show() }
     }
 
@@ -680,7 +782,9 @@ final class IslandWindowController {
             host.regionChanged = { [weak self] in self?.updatePointer() }
             panel.contentView = host
         }
-        host.applyAppearance(glass: settings.glass, blur: settings.backgroundBlur, opacity: settings.opacity)
+        host.applyAppearance(layout: settings.appearanceLayout, glass: settings.glass,
+                             blur: settings.backgroundBlur, opacity: settings.opacity,
+                             headerHeight: layout.headerHeight, shape: settings.islandShape, gradientVisibility: settings.gradientVisibility)
         // The transparent canvas stays fixed throughout all interactions.
         let expanded = layout.size(for: .expanded)
         let hover = layout.size(for: .hover)
@@ -752,9 +856,14 @@ final class IslandWindowController {
         state.setHovered(inside)
     }
 
-    private func handleEvent(isClick: Bool) {
+    private func handleEvent(isClick: Bool, fromOtherApplication: Bool = false) {
         updatePointer()
-        guard !state.isOutputPickerOpen else { return }
+        if state.isOutputPickerOpen {
+            // The transient popover handles local outside clicks. Global mouse
+            // monitoring also dismisses it when a nonactivating panel loses the click.
+            if isClick && fromOtherApplication { state.collapse() }
+            return
+        }
         if isClick, state.isExpanded,
            hostingView?.containsScreenPoint(NSEvent.mouseLocation) != true {
             state.collapse()
@@ -773,7 +882,7 @@ final class IslandWindowController {
         }
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
             let click = [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type)
-            Task { @MainActor [weak self] in self?.handleEvent(isClick: click) }
+            Task { @MainActor [weak self] in self?.handleEvent(isClick: click, fromOtherApplication: true) }
         }
     }
 }
@@ -824,6 +933,15 @@ struct IslandView: View {
     @Environment(\.accessibilityReduceMotion)
     private var reduceMotion
 
+    @Environment(\.colorSchemeContrast) private var systemContrast
+    private var textContrast: IslandTextContrast {
+        IslandTextContrast.resolve(
+            translucent: settings.appearanceLayout != .standard
+                || (settings.appearanceLayout == .standard && (settings.glass || settings.backgroundBlur)),
+            tint: settings.appearanceLayout == .softGradient ? 1 - settings.gradientVisibility : settings.opacity,
+            increased: systemContrast == .increased)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header.fixedSize(horizontal: false, vertical: true)
@@ -843,6 +961,7 @@ struct IslandView: View {
                 .animation(reduceMotion ? nil : .easeOut(duration: 0.12),
                            value: state.isExpanded)
         }
+        .environment(\.islandTextContrast, textContrast)
         .preferredColorScheme(.dark)
         .onChange(of: state.isExpanded) { _, expanded in
             if expanded { accessories.refresh() }
@@ -911,44 +1030,43 @@ struct IslandView: View {
     // MARK: Expanded Player
 
     private var expandedPlayer: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 12) {
+        VStack(spacing: 8) {
+            HStack(spacing: 10) {
                 if settings.artwork {
-                    AnimatedAlbumCover(image: player.artwork, size: 54,
+                    AnimatedAlbumCover(image: player.artwork, size: 46,
                                        active: settings.animateArtwork && player.isPlaying && state.isExpanded)
                 }
 
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
                         Text(player.title)
-                            .font(.system(size: 17, weight: .semibold))
+                            .font(.system(size: 15, weight: .bold))
                             .foregroundStyle(.white).lineLimit(1)
                         if settings.explicitTag, accessories.isExplicit == true {
                             Text("E").font(.system(size: 9, weight: .bold))
-                                .foregroundStyle(settings.explicitColor ? player.artworkAccent : Color.gray)
+                                .foregroundStyle(settings.explicitColor ? player.artworkAccent : textContrast.secondary)
                                 .padding(3).background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 3))
                                 .accessibilityLabel("Explicit")
                         }
                     }
 
-                    Text(player.subtitle)
-                        .font(
-                            .system(size: 14, weight: .medium)
-                        )
-                        .foregroundStyle(.gray)
+                    artistAndSource
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(textContrast.secondary)
                         .lineLimit(1)
 
                     if let error = accessories.error {
-                        Text(error).font(.system(size: 10))
+                        Text(error).font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(.orange).lineLimit(1).help(error)
                     } else if player.isPlaying && !audio.hasAudioSignal {
                         Text(audio.status)
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(textContrast.secondary)
                             .lineLimit(1)
                             .help(audio.status)
                     }
                 }
+                .shadow(color: .black.opacity(textContrast.shadowOpacity), radius: 1.5, y: 1)
 
                 Spacer(minLength: 8)
 
@@ -964,34 +1082,54 @@ struct IslandView: View {
                     PlayerActionButton(accessories: accessories, settings: settings, songColor: player.artworkAccent)
                 } else { Color.clear.frame(width: 36, height: 40) }
                 Spacer(minLength: 0)
-                HStack(spacing: 20) {
-                    playbackButton("backward.fill", label: "Previous track", size: 24,
+                HStack(spacing: 16) {
+                    playbackButton("backward.fill", label: "Previous track", size: 21,
                                    action: player.previous)
                     playbackButton(player.isPlaying ? "pause.fill" : "play.fill",
-                                   label: player.isPlaying ? "Pause" : "Play", size: 30,
+                                   label: player.isPlaying ? "Pause" : "Play", size: 26,
                                    action: player.togglePlayback)
-                    playbackButton("forward.fill", label: "Next track", size: 24,
+                    playbackButton("forward.fill", label: "Next track", size: 21,
                                    action: player.next)
                 }
                 .disabled(!player.canControlPlayback)
                 .opacity(player.canControlPlayback ? 1 : 0.35)
                 Spacer(minLength: 0)
-                Button { state.isOutputPickerOpen.toggle() } label: {
-                    AudioOutputIcon(device: outputs.current)
-                        .frame(width: 36, height: 40).contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Choose sound output")
-                .help(outputs.current?.name ?? "Choose sound output")
-                .popover(isPresented: $state.isOutputPickerOpen, arrowEdge: .bottom) {
-                    AudioOutputList(outputs: outputs) { state.isOutputPickerOpen = false }
-                        .preferredColorScheme(.dark)
-                }
+                OutputPickerButton(outputs: outputs, isPresented: $state.isOutputPickerOpen)
+                    .frame(width: 36, height: 40)
+
             }
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 16)
+        .padding(.horizontal, settings.islandShape == .notch ? 30 : 20)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity)
+    }
+
+    private var artistAndSource: some View {
+        HStack(spacing: 5) {
+            if let track = player.track, let source = player.captureTarget.source {
+                if source == .spotify {
+                    let artists = accessories.spotifyArtists
+                    if artists.isEmpty {
+                        Button {
+                            MediaNavigation.openArtist(name: track.artist, uri: nil)
+                        } label: { Text(track.artist.isEmpty ? "Unknown Artist" : track.artist).lineLimit(1) }
+                        .buttonStyle(.plain)
+                        .disabled(track.artist.isEmpty)
+                        .help("Search for this artist in Spotify")
+                    } else {
+                        ForEach(Array(artists.enumerated()), id: \.offset) { index, artist in
+                            if index > 0 { Text(",").accessibilityHidden(true) }
+                            Button { MediaNavigation.openArtist(name: artist.name, uri: artist.uri) } label: {
+                                Text(artist.name).lineLimit(1)
+                            }.buttonStyle(.plain).help("Open " + artist.name + " in Spotify")
+                        }
+                    }
+                } else { Text(track.artist.isEmpty ? "Unknown Artist" : track.artist).lineLimit(1) }
+                Text("·").accessibilityHidden(true)
+                Button { MediaNavigation.openSource(source) } label: { Text(source.displayName) }
+                    .buttonStyle(.plain).fixedSize().help("Open " + source.displayName)
+            } else { Text(player.subtitle).lineLimit(1) }
+        }
     }
 
     // MARK: Progress Display
@@ -1342,7 +1480,7 @@ private func loadArtwork(for trackID: String) {
         refresh()
     }
 
-    
+
 
     private func observeWorkspace(
     _ name: Notification.Name
@@ -2382,13 +2520,10 @@ final class SpotifyAccount: ObservableObject {
                               items: [URLQueryItem(name: "uris", value: uri)])
     }
 
-    func playbackDetails() async throws -> (repeatMode: String?, uri: String?, explicit: Bool?) {
+    func playbackDetails() async throws -> SpotifyPlaybackDetails {
         let data = try await request(path: "me/player", method: "GET")
-        if data.isEmpty { return (nil, nil, nil) }
-        struct Item: Decodable { let uri: String?; let explicit: Bool? }
-        struct Playback: Decodable { let repeat_state: String?; let item: Item? }
-        let value = try JSONDecoder().decode(Playback.self, from: data)
-        return (value.repeat_state, value.item?.uri, value.item?.explicit)
+        if data.isEmpty { return SpotifyPlaybackDetails(repeatMode: nil, item: nil) }
+        return try JSONDecoder().decode(SpotifyPlaybackDetails.self, from: data)
     }
 
     func setRepeatOne(_ enabled: Bool) async throws {
@@ -2512,6 +2647,7 @@ final class PlayerAccessories: ObservableObject {
     @Published private(set) var liked: Bool?
     @Published private(set) var shuffled: Bool?
     @Published private(set) var repeatOne: Bool?
+    @Published private(set) var spotifyArtists: [SpotifyArtistLink] = []
     @Published private(set) var isExplicit: Bool?
     @Published private(set) var busy = false
     @Published private(set) var error: String?
@@ -2575,7 +2711,7 @@ final class PlayerAccessories: ObservableObject {
         revision += 1
         let version = revision
         refreshTask?.cancel()
-        liked = nil; shuffled = nil; repeatOne = nil; isExplicit = nil; error = nil
+        liked = nil; shuffled = nil; repeatOne = nil; isExplicit = nil; spotifyArtists = []; error = nil
         guard let source, player.track != nil else { return }
         refreshTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -2593,16 +2729,18 @@ final class PlayerAccessories: ObservableObject {
                     guard version == self.revision else { return }
                     self.shuffled = result.booleanValue
                     if self.account.isConnected {
+                        let details = try await self.account.playbackDetails()
+                        guard version == self.revision else { return }
+                        self.repeatOne = details.repeatMode.map { $0 == "track" }
+                        if details.uri == self.trackID {
+                            self.isExplicit = details.explicit
+                            self.spotifyArtists = details.artists(matching: self.trackID)
+                        }
                         if let uri = self.trackID, Self.validSpotifyURI(uri) {
                             let saved = try await self.account.contains(uri)
                             guard version == self.revision else { return }
                             self.liked = saved
                         }
-                        let details = try await self.account.playbackDetails()
-                        guard version == self.revision else { return }
-                        self.repeatOne = details.repeatMode.map { $0 == "track" }
-                        if details.uri == self.trackID { self.isExplicit = details.explicit }
-
                     }
                 }
             } catch is CancellationError {
@@ -3011,6 +3149,7 @@ final class ScrubSession: ObservableObject {
 }
 
 struct PlaybackScrubber: View {
+    @Environment(\.islandTextContrast) private var textContrast
     @ObservedObject var player: MediaPlayer
     let isExpanded: Bool
     var onEditingChange: (Bool) -> Void = { _ in }
@@ -3065,8 +3204,9 @@ struct PlaybackScrubber: View {
                 Text("-" + timeLabel(max(0, player.duration - displayed)))
                     .frame(width: 40, alignment: .trailing)
             }
-            .font(.system(size: 11, weight: .medium, design: .rounded))
-            .monospacedDigit().foregroundStyle(.gray).frame(height: 16)
+            .font(.system(size: 11, weight: .semibold, design: .rounded))
+            .monospacedDigit().foregroundStyle(textContrast.secondary).frame(height: 16)
+            .shadow(color: .black.opacity(textContrast.shadowOpacity), radius: 1, y: 1)
         }
         .onChange(of: player.seekTarget) { _, _ in
             if session.editing { session.cancelled = true; session.draft = nil; session.target = nil }
@@ -3130,8 +3270,12 @@ final class MinnowSettings: ObservableObject {
     @Published var expandedHeight: Double { didSet { save("expandedIslandHeight", expandedHeight) } }
     @Published var allDisplays: Bool { didSet { save("islandOnAllDisplays", allDisplays) } }
     @Published var display: String { didSet { save("islandDisplayUUID", display) } }
+    @Published var islandShape: IslandShape { didSet { save("islandShape", islandShape.rawValue) } }
+    @Published var appearanceLayout: IslandAppearanceLayout { didSet { save("islandAppearanceLayout", appearanceLayout.rawValue) } }
     @Published var glass: Bool { didSet { save("islandGlassAppearance", glass) } }
+    @Published var gradientVisibility: Double { didSet { save("minnowGradientVisibility", gradientVisibility) } }
     @Published var opacity: Double { didSet { save("islandBackgroundOpacity", opacity) } }
+    @Published var slightHover: Bool { didSet { save("minnowSlightHover", slightHover) } }
     @Published var expandOnHover: Bool { didSet { save("expandIslandOnHover", expandOnHover) } }
     @Published var haptics: Bool { didSet { save("islandHaptics", haptics) } }
     @Published var artwork: Bool { didSet { save("showAlbumArtwork", artwork) } }
@@ -3178,12 +3322,16 @@ final class MinnowSettings: ObservableObject {
         openSettingsOnLaunch = bool("openSettingsOnLaunch", true)
         automaticSizing = bool("automaticIslandSizing", true)
         compactWing = number("compactWingWidth", 26, 20...60)
-        expandedWidth = number("expandedIslandWidth", 400, 340...600)
-        expandedHeight = number("expandedIslandHeight", 174, 174...280)
+        expandedWidth = number("expandedIslandWidth", 380, 320...600)
+        expandedHeight = number("expandedIslandHeight", 154, 154...280)
         allDisplays = bool("islandOnAllDisplays", false)
         display = defaults.string(forKey: "islandDisplayUUID") ?? "automatic"
+        islandShape = IslandShape(rawValue: defaults.string(forKey: "islandShape") ?? "") ?? .applePill
+        appearanceLayout = IslandAppearanceLayout(rawValue: defaults.string(forKey: "islandAppearanceLayout") ?? "") ?? .standard
         glass = bool("islandGlassAppearance", false)
         opacity = number("islandBackgroundOpacity", 1, 0.35...1)
+        gradientVisibility = number("minnowGradientVisibility", 0.45, 0...0.85)
+        slightHover = bool("minnowSlightHover", true)
         expandOnHover = bool("expandIslandOnHover", false)
         haptics = bool("islandHaptics", false)
         artwork = bool("showAlbumArtwork", true)
@@ -3197,7 +3345,8 @@ final class MinnowSettings: ObservableObject {
 
     var configuration: IslandConfiguration {
         var value = IslandConfiguration()
-        value.hoverEnabled = expandOnHover
+        value.hoverEnabled = slightHover || expandOnHover
+        value.shape = islandShape
         if !automaticSizing {
             value.miniPlayerWingWidth = compactWing
             value.expandedWidth = expandedWidth
@@ -3208,8 +3357,12 @@ final class MinnowSettings: ObservableObject {
 
     func resetPreferences() {
         islandEnabled = true; source = .auto; openSettingsOnLaunch = true
-        automaticSizing = true; compactWing = 26; expandedWidth = 400; expandedHeight = 174
+        automaticSizing = true; compactWing = 26; expandedWidth = 380; expandedHeight = 154
         allDisplays = false; display = "automatic"; glass = false; opacity = 1
+        appearanceLayout = .standard
+        gradientVisibility = 0.45
+        islandShape = .applePill
+        slightHover = true
         expandOnHover = false; haptics = false; artwork = true; leftAction = .like
         audioReactive = true; collapseOnPause = false; collapseDelay = 3
         hideOnPause = false; hideDelay = 15
@@ -3416,6 +3569,8 @@ final class IslandCoordinator {
     }
 
     private func playbackChanged() {
+        // Visibility rules apply equally to playing and paused tracks.
+        reconcileDisplays()
         if session.player.isPlaying {
             pauseTask?.cancel()
             hiddenAfterPause = false
@@ -3459,7 +3614,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         switch self {
         case .general: "launch login startup display visibility fullscreen menu hover haptic reset"
         case .playback: "music spotify source heart shuffle repeat artwork explicit waveform pause hide scrub eq"
-        case .appearance: "glass blur opacity sizing notch width height motion"
+        case .appearance: "glass blur opacity sizing notch width height motion gradient pill shape layout tint text contrast"
         }
     }
 }
@@ -3629,7 +3784,10 @@ struct MinnowSettingsView: View {
             SettingsGroup("Behaviour") {
                 Toggle("Haptic Touch", isOn: $settings.haptics)
                 Divider()
+                Toggle("Slight Hover Expansion", isOn: $settings.slightHover).disabled(settings.expandOnHover)
+                Divider()
                 Toggle("Expand on Hover", isOn: $settings.expandOnHover)
+                note("Slight expansion is on by default. Expand on Hover opens the full player instead and takes priority.")
                 note("Click to pin the player open. Haptics require supported hardware.")
             }
             SettingsCard {
@@ -3711,11 +3869,30 @@ struct MinnowSettingsView: View {
         }
     }
 
+    private var appearancePreviewFill: AnyShapeStyle {
+        if settings.appearanceLayout == .softGradient {
+            return AnyShapeStyle(LinearGradient(stops: [
+                .init(color: .black, location: 0), .init(color: .black, location: 0.3),
+                .init(color: .black.opacity(SoftGradientAppearance.bottomOpacity(visibility: settings.gradientVisibility, expansion: 1, reduceTransparency: false)), location: 1)
+            ], startPoint: .top, endPoint: .bottom))
+        }
+        return AnyShapeStyle(settings.appearanceLayout == .glassInset ? Color.black :
+            (settings.glass || settings.backgroundBlur ? Color.white.opacity(0.09) : Color.black.opacity(settings.opacity)))
+    }
+
     private var appearance: some View {
         Group {
             VStack(spacing: 14) {
-                RoundedRectangle(cornerRadius: 24)
-                    .fill(settings.glass || settings.backgroundBlur ? Color.white.opacity(0.09) : Color.black.opacity(settings.opacity))
+                IslandPreviewOutline(shape: settings.islandShape)
+                    .fill(appearancePreviewFill)
+                    .overlay {
+                        if settings.appearanceLayout == .glassInset {
+                            RoundedRectangle(cornerRadius: 17)
+                                .fill(.ultraThinMaterial)
+                                .overlay(RoundedRectangle(cornerRadius: 17).stroke(.white.opacity(0.18), lineWidth: 0.75))
+                                .padding(8)
+                        }
+                    }
                     .overlay {
                         HStack(spacing: 16) {
                             Image(systemName: "music.note").font(.title2).foregroundStyle(.pink)
@@ -3728,27 +3905,55 @@ struct MinnowSettingsView: View {
                         }.padding(22)
                     }
                     .frame(height: 96)
-                    .overlay(RoundedRectangle(cornerRadius: 24).stroke(.white.opacity(0.08)))
+                    .overlay(IslandPreviewOutline(shape: settings.islandShape).stroke(.white.opacity(0.08)))
                 Text("Appearance changes apply immediately.").font(.caption).foregroundStyle(.secondary)
             }.padding(.vertical, 5)
-            SettingsGroup("Glass") {
-                Toggle("Liquid Glass View", isOn: $settings.glass)
+            SettingsGroup("Layout", caption: "Standard keeps your current appearance. Glass Inset places the glass player inside a solid black island.") {
+                Picker("Island Layout", selection: $settings.appearanceLayout) {
+                    ForEach(IslandAppearanceLayout.allCases) { layout in
+                        Text(layout.title).tag(layout)
+                    }
+                }.pickerStyle(.segmented)
                 Divider()
-                SettingsSlider(title: settings.glass ? "Glass Tint" : "Background Opacity", value: $settings.opacity,
-                               range: 0.35...1, suffix: "%", multiplier: 100)
-                HStack { Text("Clear"); Spacer(); Text("Dark") }.font(.caption).foregroundStyle(.secondary)
-                note("Native Liquid Glass on macOS 26 and later; blurred material on earlier versions. Controls remain opaque.")
-                Divider()
-                Toggle("Background Blur", isOn: $settings.backgroundBlur).disabled(settings.glass)
-                note("Glass includes its own blur. Background Blur applies when Liquid Glass is off.")
+                Picker("Island Shape", selection: $settings.islandShape) {
+                    ForEach(IslandShape.allCases) { shape in Text(shape.title).tag(shape) }
+                }.pickerStyle(.segmented)
+                note("Apple Pill keeps rounded upper corners. Notch flares into the screen's top edge, matching the reference. Shape and material are independent.")
+                if settings.appearanceLayout == .glassInset {
+                    note("The compact island and camera header stay black. The expanded player gets an inset glass panel with a black border.")
+                }
+            }
+            SettingsGroup(settings.appearanceLayout == .softGradient ? "Gradient" : "Glass") {
+                if settings.appearanceLayout == .standard {
+                    Toggle("Liquid Glass View", isOn: $settings.glass)
+                    Divider()
+                }
+                if settings.appearanceLayout == .softGradient {
+                    SettingsSlider(title: "Background Visibility", value: $settings.gradientVisibility,
+                                   range: 0...0.85, suffix: "%", multiplier: 100)
+                    HStack { Text("Solid"); Spacer(); Text("More Background") }.font(.caption).foregroundStyle(.secondary)
+                    note("Black at the camera header, fading into the wallpaper or windows behind the player. Higher visibility reveals more of the background. System Reduce Transparency keeps the surface opaque.")
+                } else {
+                    SettingsSlider(title: settings.appearanceLayout == .glassInset || settings.glass ? "Glass Tint" : "Background Opacity",
+                                   value: $settings.opacity, range: 0.35...1, suffix: "%", multiplier: 100)
+                    HStack { Text("Clear"); Spacer(); Text("Dark") }.font(.caption).foregroundStyle(.secondary)
+                    note("Native Liquid Glass on macOS 26 and later; blurred material on earlier versions. Controls remain opaque.")
+                }
+                if settings.appearanceLayout == .standard {
+                    Divider()
+                    Toggle("Background Blur", isOn: $settings.backgroundBlur).disabled(settings.glass)
+                    note("Glass includes its own blur. Background Blur applies when Liquid Glass is off.")
+                } else if settings.appearanceLayout == .glassInset {
+                    note("Glass Inset includes blur. Your Standard glass and blur preferences are kept when you switch layouts.")
+                }
             }
             SettingsGroup("Sizing") {
                 Toggle("Automatic Sizing", isOn: $settings.automaticSizing)
                 if !settings.automaticSizing {
                     Divider()
                     SettingsSlider(title: "Compact Side Width", value: $settings.compactWing, range: 20...60, suffix: "pt")
-                    SettingsSlider(title: "Expanded Width", value: $settings.expandedWidth, range: 340...600, suffix: "pt")
-                    SettingsSlider(title: "Expanded Height", value: $settings.expandedHeight, range: 174...280, suffix: "pt")
+                    SettingsSlider(title: "Expanded Width", value: $settings.expandedWidth, range: 320...600, suffix: "pt")
+                    SettingsSlider(title: "Expanded Height", value: $settings.expandedHeight, range: 154...280, suffix: "pt")
                 }
             }
             SettingsGroup("Notch Tuning", caption: "Offsets from the size reported by the display. Dimensions use macOS points.") {
@@ -3915,8 +4120,14 @@ enum ArtworkPalette {
 
 @MainActor
 enum FullscreenVisibility {
-    static func matches(window: CGRect, display: CGRect) -> Bool {
-        abs(window.minX - display.minX) < 3 && abs(window.minY - display.minY) < 3
+    static func matches(window: CGRect, display: CGRect, systemFullscreen: Bool = false) -> Bool {
+        if systemFullscreen, display.width > 0, display.height > 0 {
+            // Notched Macs may reserve the camera strip above a native fullscreen window.
+            let overlap = display.intersection(window)
+            return !overlap.isNull && overlap.width / display.width > 0.9
+                && overlap.height / display.height > 0.9
+        }
+        return abs(window.minX - display.minX) < 3 && abs(window.minY - display.minY) < 3
             && abs(window.width - display.width) < 3 && abs(window.height - display.height) < 3
     }
     static func covers(_ screen: NSScreen) -> Bool {
@@ -3930,7 +4141,251 @@ enum FullscreenVisibility {
                   (value[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
                   let raw = value[kCGWindowBounds as String] as? NSDictionary,
                   let frame = CGRect(dictionaryRepresentation: raw) else { return false }
-            return matches(window: frame, display: bounds)
+            return matches(window: frame, display: bounds,
+                           systemFullscreen: NSApp.currentSystemPresentationOptions.contains(.fullScreen))
         }
+    }
+}
+
+
+// MARK: - Island Appearance Layout
+
+enum IslandAppearanceLayout: String, CaseIterable, Identifiable {
+    case standard, glassInset, softGradient
+    var id: String { rawValue }
+    var title: String { switch self { case .standard: "Standard"; case .glassInset: "Glass Inset"; case .softGradient: "Soft Gradient" } }
+}
+
+/// AppKit coordinates inside the surface run from the bottom left.
+/// Keep a solid camera header and ten-point outer frame during resizing.
+struct InsetGlassGeometry {
+    static func frame(size: CGSize, headerHeight: CGFloat, sideInset: CGFloat = 10) -> CGRect {
+        let width = size.width - sideInset * 2
+        let height = size.height - headerHeight - 18
+        guard width > 0, height > 0 else { return .zero }
+        return CGRect(x: sideInset, y: 10, width: width, height: height)
+    }
+    static func cornerRadius(for frame: CGRect) -> CGFloat {
+        min(22, frame.width / 2, frame.height / 2)
+    }
+}
+
+
+// MARK: - Automatic Text Contrast
+
+struct IslandTextContrast {
+    let secondaryOpacity: Double
+    let shadowOpacity: Double
+    var secondary: Color { .white.opacity(secondaryOpacity) }
+
+    /// Brighter, heavier lettering and a subtle glyph shadow, never text plates.
+    static func resolve(translucent: Bool, tint: Double, increased: Bool) -> Self {
+        let bounded = tint.isFinite ? min(1, max(0, tint)) : 1
+        let clarity = 1 - bounded
+        return Self(secondaryOpacity: increased ? 1 : (translucent ? 0.96 : 0.90),
+                    shadowOpacity: increased ? 0.7 : (translucent ? 0.35 + clarity * 0.25 : 0.25))
+    }
+}
+
+private struct IslandTextContrastKey: EnvironmentKey {
+    static let defaultValue = IslandTextContrast.resolve(translucent: false, tint: 1, increased: false)
+}
+
+extension EnvironmentValues {
+    var islandTextContrast: IslandTextContrast {
+        get { self[IslandTextContrastKey.self] }
+        set { self[IslandTextContrastKey.self] = newValue }
+    }
+}
+
+
+// MARK: - Transient Sound Output Picker
+
+@MainActor
+struct OutputPickerButton: NSViewRepresentable {
+    @ObservedObject var outputs: AudioOutputs
+    @Binding var isPresented: Bool
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeNSView(context: Context) -> NSButton {
+        let button = NSButton(frame: CGRect(x: 0, y: 0, width: 36, height: 40))
+        button.isBordered = false
+        button.imagePosition = .imageOnly
+        button.imageScaling = .scaleProportionallyDown
+        button.contentTintColor = .white
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.toggle)
+        button.setAccessibilityLabel("Choose sound output")
+        context.coordinator.anchor = button
+        return button
+    }
+    func updateNSView(_ button: NSButton, context: Context) {
+        context.coordinator.parent = self
+        let device = outputs.current
+        let image: NSImage?
+        if let device, let native = device.nativeIcon, !device.symbol.hasPrefix("airpods") {
+            image = native.copy() as? NSImage
+        } else {
+            image = NSImage(systemSymbolName: device?.symbol ?? "speaker.wave.2", accessibilityDescription: nil)
+        }
+        image?.isTemplate = true
+        image?.size = NSSize(width: 20, height: 20)
+        button.image = image
+        button.toolTip = device?.name ?? "Choose sound output"
+        context.coordinator.synchronize()
+    }
+    static func dismantleNSView(_ nsView: NSButton, coordinator: Coordinator) {
+        coordinator.popover.delegate = nil
+        coordinator.popover.performClose(nil)
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSPopoverDelegate {
+        var parent: OutputPickerButton
+        weak var anchor: NSButton?
+        let popover = NSPopover()
+        init(_ parent: OutputPickerButton) {
+            self.parent = parent
+            super.init()
+            popover.behavior = .transient
+            popover.animates = true
+            popover.delegate = self
+        }
+        @objc func toggle() {
+            if popover.isShown { close() }
+            else { parent.isPresented = true; synchronize() }
+        }
+        func synchronize() {
+            guard parent.isPresented else {
+                if popover.isShown { popover.performClose(nil) }
+                return
+            }
+            guard !popover.isShown, let anchor, anchor.window != nil else { return }
+            let root = AudioOutputList(outputs: parent.outputs) { [weak self] in self?.close() }
+                .preferredColorScheme(.dark)
+            popover.contentViewController = NSHostingController(rootView: root)
+            popover.contentSize = NSSize(width: 280, height: 280)
+            popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+        }
+        func close() {
+            parent.isPresented = false
+            if popover.isShown { popover.performClose(nil) }
+        }
+        func popoverDidClose(_ notification: Notification) {
+            if parent.isPresented { parent.isPresented = false }
+        }
+    }
+}
+
+
+// MARK: - Artist Metadata and Navigation
+
+struct SpotifyArtistLink: Decodable, Equatable, Sendable {
+    let name: String
+    let uri: String?
+}
+
+struct SpotifyPlaybackDetails: Decodable, Sendable {
+    struct Item: Decodable, Sendable {
+        let uri: String?
+        let explicit: Bool?
+        let artists: [SpotifyArtistLink]?
+    }
+    let repeatMode: String?
+    let item: Item?
+    enum CodingKeys: String, CodingKey { case repeatMode = "repeat_state", item }
+    var uri: String? { item?.uri }
+    var explicit: Bool? { item?.explicit }
+    func artists(matching trackID: String?) -> [SpotifyArtistLink] {
+        guard let trackID, !trackID.isEmpty, item?.uri == trackID else { return [] }
+        return (item?.artists ?? []).filter { !$0.name.isEmpty && MediaNavigation.artistID(from: $0.uri) != nil }
+    }
+}
+
+enum MediaNavigation {
+    static func artistID(from uri: String?) -> String? {
+        guard let uri, uri.hasPrefix("spotify:artist:") else { return nil }
+        let value = String(uri.dropFirst("spotify:artist:".count))
+        guard value.count == 22, value.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }) else { return nil }
+        return value
+    }
+    static func artistURL(name: String, uri: String?, web: Bool = false) -> URL? {
+        if let id = artistID(from: uri) {
+            return URL(string: web ? "https://open.spotify.com/artist/" + id : "spotify:artist:" + id)
+        }
+        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let safe = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        guard let encoded = name.addingPercentEncoding(withAllowedCharacters: safe) else { return nil }
+        return URL(string: web ? "https://open.spotify.com/search/" + encoded : "spotify:search:" + encoded)
+    }
+    @MainActor static func openSource(_ source: MusicSource) {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: source.bundleIdentifier) else { return }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.openApplication(at: url, configuration: configuration, completionHandler: nil)
+    }
+    @MainActor static func openArtist(name: String, uri: String?) {
+        guard let url = artistURL(name: name, uri: uri) else { return }
+        if !NSWorkspace.shared.open(url), let fallback = artistURL(name: name, uri: uri, web: true) {
+            NSWorkspace.shared.open(fallback)
+        }
+    }
+}
+
+
+// MARK: - Expanded Island Shape
+
+enum IslandShape: String, CaseIterable, Identifiable {
+    case applePill, notch
+    var id: String { rawValue }
+    var title: String { self == .applePill ? "Apple Pill" : "Notch" }
+}
+
+struct IslandShapeGeometry {
+    static func shoulder(size: CGSize, expansion: Double) -> CGFloat {
+        min(14 * min(1, max(0, expansion)), size.width / 8, size.height / 3)
+    }
+    static func path(size: CGSize, radius: CGFloat, shape: IslandShape, expansion: Double) -> CGPath {
+        let rect = CGRect(origin: .zero, size: size)
+        let r = min(radius, size.height / 2, size.width / 2)
+        let s = shoulder(size: size, expansion: expansion)
+        guard shape == .notch, s > 0.01 else {
+            return CGPath(roundedRect: rect, cornerWidth: r, cornerHeight: r, transform: nil)
+        }
+        let w = size.width, h = size.height
+        let bottom = min(r, (w - 2 * s) / 2, (h - s) / 2)
+        let p = CGMutablePath()
+        p.move(to: CGPoint(x: 0, y: h))
+        p.addLine(to: CGPoint(x: w, y: h))
+        p.addCurve(to: CGPoint(x: w - s, y: h - s), control1: CGPoint(x: w - s, y: h), control2: CGPoint(x: w - s, y: h))
+        p.addLine(to: CGPoint(x: w - s, y: bottom))
+        p.addQuadCurve(to: CGPoint(x: w - s - bottom, y: 0), control: CGPoint(x: w - s, y: 0))
+        p.addLine(to: CGPoint(x: s + bottom, y: 0))
+        p.addQuadCurve(to: CGPoint(x: s, y: bottom), control: CGPoint(x: s, y: 0))
+        p.addLine(to: CGPoint(x: s, y: h - s))
+        p.addCurve(to: CGPoint(x: 0, y: h), control1: CGPoint(x: s, y: h), control2: CGPoint(x: s, y: h))
+        p.closeSubpath()
+        return p
+    }
+}
+
+struct IslandPreviewOutline: Shape {
+    let shape: IslandShape
+    func path(in rect: CGRect) -> Path {
+        let path = IslandShapeGeometry.path(size: rect.size, radius: 24, shape: shape, expansion: 1)
+        var flip = CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: rect.minX, ty: rect.maxY)
+        return Path(path.copy(using: &flip) ?? path)
+    }
+}
+
+
+// MARK: - Background-Revealing Gradient
+
+struct SoftGradientAppearance {
+    static func bottomOpacity(visibility: Double, expansion: Double, reduceTransparency: Bool) -> Double {
+        guard !reduceTransparency else { return 1 }
+        let visible = visibility.isFinite ? min(0.85, max(0, visibility)) : 0.45
+        let amount = expansion.isFinite ? min(1, max(0, expansion)) : 0
+        return 1 - visible * amount
     }
 }
