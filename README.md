@@ -1,0 +1,79 @@
+# Minnow V1
+
+Native macOS island for Apple Music and Spotify. Requires macOS 14+ and Swift 6.4.
+
+## Build and launch
+
+From this folder:
+
+```sh
+zsh scripts/build-app.sh
+open .build/Minnow.app
+```
+
+Quit the previous Minnow instance first. The build script creates and locally signs a development app; it does not install or launch it. Launch the bundle above rather than an older copy in Applications. Release signing, notarization, and distribution are separate work.
+
+The active source is `Sources/MacDynamicBar/MacDynamicBar.swift`. Package.swift explicitly builds this file. The earlier App, Island, and Media folders remain excluded as a reference; editing them will not change this build.
+
+## Menu
+
+1. Hide Island / Show Island
+2. Source → Auto, Music, Spotify
+3. Audio-Reactive Waves
+4. Refresh Playback
+5. Settings…
+6. Quit Minnow
+
+Hide stops displaying the island and suspends waveform capture; it leaves the music application playing. Auto follows the most recently started player. Music and Spotify keep the selected player fixed.
+
+## Settings
+
+The settings window follows the supplied 1:21 PM Canopy reference: dark sidebar, search, source tiles, rounded groups, and three pages.
+
+- **General:** launch at login, open settings on launch, automatic/all/main/individual displays, enable island, hide in fullscreen, menu icon visibility, haptics, slight hover expansion (default), full-player hover expansion, reset preferences.
+- **Media:** media enable, Auto/Music/Spotify source cards, Heart/Shuffle/Repeat/None, cover visibility and motion, explicit badge/colour, heart colour from artwork, live waveform and retry, pause collapse, pause hiding (instant/delay/never), collapse after seeking, Spotify account.
+- **Appearance:** Standard/Glass Inset/Soft Gradient material selection and Apple Pill/Notch shape, glass, clear-to-dark background tint/opacity, background blur, automatic/custom sizing, notch width and height offsets, system Reduce Motion support.
+
+Choose **Appearance → Layout → Glass Inset** for option C. Standard remains the default and existing installations stay on their current appearance. Glass Inset uses an opaque black camera header, compact wings, and ten-point outer frame; the expanded player has a separate inset native glass panel. The black shell has a cutout so an opaque backing does not block the material. Its panel and rim resize with the existing surface spring. The Glass Tint slider adjusts the inset; switching back restores the existing Standard glass/blur settings. macOS 14–25 use blurred material in the same layout. Native material appearance still needs a live playback check.
+
+Preferences persist and apply live. General reset keeps Spotify credentials and actual macOS login-item registration. Reopen Minnow from Finder to reach Settings when its menu icon is hidden. Hiding/disabling the media surface does not pause music in the desktop app.
+
+Fullscreen hiding watches macOS system presentation options as well as Space/application changes, then checks the frontmost app's window bounds on each display. It also handles the camera strip reserved above native fullscreen windows, regardless of whether playback is playing or paused. Fullscreen games or apps with unusual window arrangements still need live verification. All displays share one playback/capture session.
+
+### Differences and deferred controls
+
+- **Hide from Screen Capture:** shown unavailable. Apple's current documentation calls the old NSWindow sharing exclusion a legacy constant that macOS no longer uses; Minnow does not promise that screen recorders will omit it.
+- **EQ:** shown unavailable. Processing another app's audio requires a separate routing/processing engine. Existing playback capture only measures sound; it does not alter output.
+- **Animate Artwork:** applies gentle movement to the static cover while playing. It does not download video artwork, which the desktop scripting interfaces do not supply.
+- **Explicit labels:** read from the optional Spotify connection only when the API track URI matches the desktop track. Apple Music's scripting data here does not expose an explicit-content flag. Unknown status never produces a guessed badge.
+- Battery, lockscreen, sound effects tied to lock/unlock, and unrelated overlay modules remain outside this update.
+
+Launch at login uses macOS ServiceManagement and needs the bundled app at a stable location. Glass uses the native glass view on macOS 26+ and a blurred material on older systems.
+
+Playback controls have explicit white icons. The scrubber uses a muted full-length track and white elapsed bar. Dragging previews the position and seeks once on release; changing songs or sources cancels the drag. The output picker lists connected Mac audio outputs in a transient native popover. Clicking another app dismisses it and collapses the player; selecting an output also dismisses it.
+
+The automatic expanded size is now 380 × 154 points below the notch (previously 400 × 174). Artwork is 46 points; the title is 15-point bold and the artist row is 12-point semibold. Spacing and padding are tighter, while playback and output buttons retain their existing hit areas. Existing manual dimensions are preserved; use Automatic Sizing for the new defaults.
+
+## Hover, contrast, shape, and links
+
+- **General → Slight Hover Expansion** is on by default. **Expand on Hover** overrides it to open the full player. Turning both off disables hover resizing. Click-pinned expansion still works.
+- Labels and timestamps use brighter, heavier lettering with a subtle glyph shadow. Rectangular text backings have been removed. The policy follows system increased contrast and does not sample the wallpaper or start screen capture.
+- **Appearance → Layout → Soft Gradient** fades black into the actual wallpaper or windows behind the player. **Background Visibility** controls transparency from 0% to 85%, independently of Glass Tint. The default is 45%. The compact surface and camera header stay black. System Reduce Transparency keeps the surface opaque.
+- **Appearance → Island Shape → Notch** connects the expanded surface to the display's top edge with concave shoulders; **Apple Pill** keeps rounded upper corners. Shape and material are independent and saved. Existing installations keep their current material and Apple Pill shape.
+- In the expanded metadata row, the Spotify label opens the desktop app. With account metadata for the exact desktop track, individual artist names open their artist pages. Otherwise the label explicitly offers an artist search. Track changes invalidate the old artist links.
+
+Spotify artist and search URIs were tested live through the desktop URL handler: both opened the expected Spotify artist/search view. Full island-button click routing, output-popover dismissal, glass contrast on real wallpaper, and fullscreen transitions still require a live test of the rebuilt Minnow app.
+
+Spotify desktop playback, controls, artwork and seeking do not require Web API login. Liked Songs and repeat-one use the existing optional Spotify account connection in Media Playback. The redirect registered for that developer app must match `http://127.0.0.1:8888/spotify/callback`. No client secret belongs in this app.
+
+Allow Automation access for the music applications when prompted. Audio-reactive waves also need macOS capture access and display the system capture indicator while active. Disable waves to stop audio capture.
+
+## Validation
+
+`swift test` covers geometry, hover/pinning, delayed hover exit during scrubbing, persistent preferences/custom sizing, layout migration and switching, inset geometry around the camera, seek clamping/invalid input, default-versus-full hover, automatic contrast, Spotify URI encoding and stale-track metadata, connected-notch geometry, and output-picker state reset.
+
+Native compilation and nineteen tests passed in this workspace. The app bundle and Info.plist were checked. A running Minnow instance was not available to the connected desktop, so end-to-end island UI checks remain unverified. Live player permissions, hardware output changes, Spotify account writes, fullscreen Spaces, and login registration also need a live desktop check.
+
+## Manual check
+
+Open the built app and confirm the menu order and all three settings pages. Change sizing and opacity, close/reopen settings, and relaunch to confirm persistence. With a song playing, verify white transport icons, seeking, manual/Auto source selection, and output switching. Verify Hide/Show, hover, pause delays and display reconnects. Test launch at login after moving the app to a stable location.
