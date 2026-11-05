@@ -11,7 +11,7 @@ final class IslandCoordinator {
   let activities = ActivityStore()
   let sceneWidgets = MusicSceneWidgets()
   let widgets = WidgetServices()
-  private lazy var lockScreen = LockScreenController(
+  lazy var lockScreen = LockScreenController(
     session: session, settings: settings, widgets: widgets, readings: sceneWidgets)
   private var musicScene: MusicSceneWindow?
   let airPods = AirPodsMonitor()
@@ -37,6 +37,11 @@ final class IslandCoordinator {
     volumeHUD.onEvent = { [weak self] in self?.submit($0) }
 
     airPods.onEvent = { [weak self] event in self?.submit(event) }
+    airPods.nameForAddress = { [weak self] rawAddress in
+      guard let address = BluetoothOutputNaming.address(in: rawAddress) else { return nil }
+      self?.session.outputs.reload()
+      return self?.session.outputs.devices.first { $0.bluetoothAddress == address }?.name
+    }
     airPods.isSelectedForOutput = { [weak self] name in
       guard !name.isEmpty else { return false }
       return self?.session.outputs.current?.name.localizedCaseInsensitiveCompare(name)
@@ -64,6 +69,7 @@ final class IslandCoordinator {
       .store(in: &subscriptions)
     session.start()
     volumeHUD.start()
+    lockScreen.onPresentationChanged = { [weak self] in self?.reconcileDisplays() }
     lockScreen.start()
     reconcileDisplays()
     applyEventSettings()
@@ -158,10 +164,12 @@ final class IslandCoordinator {
         controller.hide()
       }
     }
-    session.audio.setSuspended(!anyVisible || !settings.mediaEnabled || hiddenAfterPause)
+    let desktopAudio = anyVisible && settings.mediaEnabled && !hiddenAfterPause
+    session.audio.setSuspended(!(desktopAudio || lockScreen.isPresentingPlayer))
   }
 
   func refreshVisibility() {
+    session.audio.retryAfterPermissionChange()
     visibilityTask?.cancel()
     visibilityTask = Task { @MainActor [weak self] in
       do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
@@ -182,12 +190,8 @@ final class IslandCoordinator {
 
   func setSessionActive(_ active: Bool) {
     sessionActive = active
-    if !active {
-      popups.clear()
-      lockScreen.suspend()
-    } else {
-      lockScreen.resume()
-    }
+    if !active { popups.clear() }
+    lockScreen.sessionActivityChanged(active)
     reconcileDisplays()
   }
 
@@ -198,8 +202,7 @@ final class IslandCoordinator {
   }
   func retryCapture() {
     guard settings.audioReactive else { return }
-    session.audio.setEnabled(false)
-    session.audio.setEnabled(true)
+    session.audio.retry()
     reconcileDisplays()
   }
   func stop() {

@@ -89,6 +89,8 @@ private func snapshot(_ percent: Int, plugged: Bool = false, charging: Bool = fa
       == "airpodspro")
   #expect(AirPodsIdentity.resolve(name: "AirPods Max")?.symbol == "airpodsmax")
   #expect(AirPodsIdentity.resolve(name: "AirPods")?.symbol == "airpods")
+  #expect(AirPodsIdentity.resolve(name: "AirPods\u{00A0}Pro")?.symbol == "airpodspro")
+  #expect(AirPodsIdentity.resolve(name: "Renamed", vendor: 0x05AC, product: 0x200A)?.symbol == "airpodsmax")
 }
 
 @Test @MainActor func popupPriorityCoalescingAndCriticalPreemption() {

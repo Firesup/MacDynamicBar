@@ -30,14 +30,42 @@ final class SpotifyPlayer: ObservableObject, DesktopPlayback {
   }
   var canControlPlayback: Bool { isRunning && track != nil && lastError == nil }
 
+  private var sessionLocked = false
+  func setSessionLocked(_ locked: Bool) { sessionLocked = locked }
+
+  private func receivePlaybackNotice(_ notice: DesktopPlaybackNotice?) {
+    guard sessionLocked else { refresh(); return }
+    guard let notice else { return }
+    isRunning = true
+    let position = playbackPosition(at: .now)
+    if let incoming = notice.track {
+      let sameTrack = (incoming.id != nil && incoming.id == track?.id)
+        || (incoming.title == track?.title && incoming.artist == track?.artist && incoming.album == track?.album)
+      if !sameTrack {
+        artwork = nil
+        duration = notice.duration ?? 0
+      }
+      // A partial event for the current track must not erase its confirmed seek identifier.
+      if !sameTrack || incoming.id != nil { track = incoming }
+      positionAtUpdate = notice.position ?? (sameTrack ? position : 0)
+    } else {
+      positionAtUpdate = notice.position ?? position
+    }
+    if let duration = notice.duration { self.duration = duration }
+    positionUpdatedAt = .now
+    isPlaying = notice.playing
+    onChange?()
+  }
+
   func start() {
     guard observers.isEmpty else { return }
     let distributed = DistributedNotificationCenter.default()
     let playback = distributed.addObserver(
       forName: Notification.Name("com.spotify.client.PlaybackStateChanged"),
       object: nil, queue: .main
-    ) { [weak self] _ in
-      MainActor.assumeIsolated { self?.refresh() }
+    ) { [weak self] notification in
+      let notice = DesktopPlaybackNotice(userInfo: notification.userInfo ?? [:], source: .spotify)
+      MainActor.assumeIsolated { self?.receivePlaybackNotice(notice) }
     }
     observers.append((distributed, playback))
     let workspace = NSWorkspace.shared.notificationCenter
@@ -69,6 +97,7 @@ final class SpotifyPlayer: ObservableObject, DesktopPlayback {
   }
 
   func refresh() {
+    guard !sessionLocked else { return }
     guard !isRefreshing else { return }
     isRefreshing = true
     defer {

@@ -62,11 +62,16 @@ protocol DesktopPlayback: AnyObject {
   func start()
   func stop()
   func refresh()
+  func setSessionLocked(_ locked: Bool)
   func togglePlayback()
   func next()
   func previous()
   func playbackPosition(at date: Date) -> TimeInterval
   func seek(to position: TimeInterval, expectedTrackID: String)
+}
+
+extension DesktopPlayback {
+  func setSessionLocked(_ locked: Bool) {}
 }
 
 extension AppleMusicPlayer: DesktopPlayback {}
@@ -116,6 +121,10 @@ final class MediaPlayer: ObservableObject {
   func refresh() {
     appleMusic.refresh()
     spotify.refresh()
+  }
+  func setSessionLocked(_ locked: Bool) {
+    appleMusic.setSessionLocked(locked)
+    spotify.setSessionLocked(locked)
   }
   func togglePlayback() { current?.togglePlayback() }
   func next() { current?.next() }
@@ -172,6 +181,6 @@ final class MediaPlayer: ObservableObject {
     // two playing apps must restart audio capture even if isPlaying stays true.
     captureTarget = AudioCaptureTarget(
       source: source,
-      isPlaying: selected.isPlaying && selected.canControlPlayback)
+      isPlaying: selected.isPlaying)
   }
 }

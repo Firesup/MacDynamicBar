@@ -2,7 +2,7 @@ import Foundation
 
 /// Value-only presentation data. Event monitors never own windows or playback.
 struct IslandPopup: Identifiable, Equatable {
-  enum Kind: String { case lowBattery, charging, airPods, notification, hud }
+  enum Kind: String { case lowBattery, charging, airPods, notification, hud, phoneCall }
   let id: UUID
   let kind: Kind
   let key: String
@@ -30,6 +30,7 @@ struct IslandPopup: Identifiable, Equatable {
 
   var priority: Int {
     switch kind {
+    case .phoneCall: 90
     case .lowBattery: 100
     case .charging: 40
     case .airPods: 20
@@ -43,6 +44,10 @@ struct IslandPopup: Identifiable, Equatable {
 
   static func preview(_ kind: Kind) -> IslandPopup {
     switch kind {
+    case .phoneCall:
+      IslandPopup(
+        kind: kind, key: "preview.phoneCall", title: "Incoming Call",
+        subtitle: "Sample caller · Phone", symbol: "phone.fill", isPreview: true)
     case .hud:
       IslandPopup(
         kind: kind, key: "preview.hud", title: "Volume", subtitle: "Sound output",

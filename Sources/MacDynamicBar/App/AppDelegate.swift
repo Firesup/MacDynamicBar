@@ -87,7 +87,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   private func configureMenu() {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-    let image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Minnow")
+    let image = NSImage(systemSymbolName: "fish.fill", accessibilityDescription: "Minnow")
     image?.isTemplate = true
     item.button?.image = image
     let menu = NSMenu()

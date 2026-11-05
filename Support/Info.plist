@@ -5,6 +5,7 @@
     <key>CFBundleName</key><string>Minnow</string>
     <key>CFBundleDisplayName</key><string>Minnow</string>
     <key>CFBundleIdentifier</key><string>com.minnow.MacDynamicBar</string>
+    <key>CFBundleIconFile</key><string>Minnow</string>
     <key>CFBundleExecutable</key><string>MacDynamicBar</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>1.0</string>

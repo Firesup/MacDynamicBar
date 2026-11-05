@@ -11,9 +11,16 @@ swift build --disable-sandbox --cache-path "$PWD/.build/package-cache" \
     -Xswiftc -module-cache-path -Xswiftc "$CLANG_MODULE_CACHE_PATH"
 
 app="$PWD/.build/Minnow.app"
-mkdir -p "$app/Contents/MacOS"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+swiftc -module-cache-path "$CLANG_MODULE_CACHE_PATH" -framework AppKit \
+    scripts/generate-icon.swift -o "$PWD/.build/generate-icon"
+"$PWD/.build/generate-icon" "$PWD/.build/Minnow.iconset"
+iconutil -c icns "$PWD/.build/Minnow.iconset" -o "$app/Contents/Resources/Minnow.icns"
 cp .build/debug/MacDynamicBar "$app/Contents/MacOS/MacDynamicBar"
 cp Support/Info.plist "$app/Contents/Info.plist"
 plutil -lint "$app/Contents/Info.plist"
-codesign --force --sign - "$app"
+# A persistent signing certificate keeps TCC permission identity across rebuilds.
+# The default ad-hoc identity changes with the executable and may need reauthorization.
+signing_identity="${MINNOW_SIGN_IDENTITY:--}"
+codesign --force --sign "$signing_identity" "$app"
 printf 'Built %s\nLaunch with: open "%s"\n' "$app" "$app"

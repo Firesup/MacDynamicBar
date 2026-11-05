@@ -3,7 +3,7 @@ import Combine
 
 // MARK: - Apple Music Track
 
-struct MusicTrack: Equatable {
+struct MusicTrack: Equatable, Sendable {
   let title: String
   let artist: String
   let album: String
@@ -125,6 +125,33 @@ final class AppleMusicPlayer: ObservableObject {
     isMusicRunning && track != nil && lastError == nil
   }
 
+  private var sessionLocked = false
+  func setSessionLocked(_ locked: Bool) { sessionLocked = locked }
+
+  private func receivePlaybackNotice(_ notice: DesktopPlaybackNotice?) {
+    guard sessionLocked else { refresh(); return }
+    guard let notice else { return }
+    isMusicRunning = true
+    let position = playbackPosition(at: .now)
+    if let incoming = notice.track {
+      let sameTrack = (incoming.id != nil && incoming.id == track?.id)
+        || (incoming.title == track?.title && incoming.artist == track?.artist && incoming.album == track?.album)
+      if !sameTrack {
+        artwork = nil
+        duration = notice.duration ?? 0
+      }
+      // A partial event for the current track must not erase its confirmed seek identifier.
+      if !sameTrack || incoming.id != nil { track = incoming }
+      positionAtUpdate = notice.position ?? (sameTrack ? position : 0)
+    } else {
+      positionAtUpdate = notice.position ?? position
+    }
+    if let duration = notice.duration { self.duration = duration }
+    positionUpdatedAt = .now
+    isPlaying = notice.playing
+    onChange?()
+  }
+
   func start() {
     // Prevent duplicate observers if start is called again.
     guard playbackObserver == nil else { return }
@@ -136,9 +163,10 @@ final class AppleMusicPlayer: ObservableObject {
         ),
         object: nil,
         queue: .main
-      ) { [weak self] _ in
+      ) { [weak self] notification in
+        let notice = DesktopPlaybackNotice(userInfo: notification.userInfo ?? [:], source: .appleMusic)
         MainActor.assumeIsolated {
-          self?.refresh()
+          self?.receivePlaybackNotice(notice)
         }
       }
 
@@ -171,6 +199,7 @@ final class AppleMusicPlayer: ObservableObject {
   }
 
   func refresh() {
+    guard !sessionLocked else { return }
     // Prevent overlapping refreshes while AppleScript processes events.
     guard !isRefreshing else { return }
 

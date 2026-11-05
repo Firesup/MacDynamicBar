@@ -12,7 +12,8 @@ struct LockScreenPlayerView: View {
 
   var body: some View {
     GeometryReader { geometry in
-      let art = min(360, geometry.size.height - 190)
+      let card = LockScreenGeometry.cardFrame(size: geometry.size)
+      let art = LockScreenGeometry.artworkFrame(size: geometry.size, lyrics: showLyrics).width
       VStack(spacing: 20) {
         Spacer(minLength: 0)
         if expanded {
@@ -48,6 +49,8 @@ struct LockScreenPlayerView: View {
           .background { SceneGlass() }.clipShape(RoundedRectangle(cornerRadius: 28))
           .overlay(
             RoundedRectangle(cornerRadius: 28).strokeBorder(.white.opacity(0.25), lineWidth: 0.7))
+          .scaleEffect(card.width / 408, anchor: .bottom)
+          .frame(width: card.width, height: card.height)
       }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .foregroundStyle(.white).preferredColorScheme(.dark)
         .onAppear { if !state.isExpanded { state.toggle() } }

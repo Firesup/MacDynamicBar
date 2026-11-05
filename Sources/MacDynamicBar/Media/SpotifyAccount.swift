@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import CryptoKit
 import Network
+import LocalAuthentication
 import Security
 
 // MARK: - Spotify Account Authorization (PKCE)
@@ -180,24 +181,56 @@ final class SpotifyAccount: ObservableObject {
   }
 
   private init() {
+    // Even a noninteractive legacy Keychain read can wait on securityd. Never run it on the UI thread.
+    let service = service
+    let version = generation
+    Task { @MainActor [weak self] in
+      let result = await Task.detached {
+        Self.readStoredTokens(service: service, allowInteraction: false)
+      }.value
+      guard let self, self.generation == version, !self.isConnecting, self.tokens == nil else { return }
+      _ = self.applyStoredTokens(result)
+    }
+  }
+
+  nonisolated private static func readStoredTokens(service: String, allowInteraction: Bool)
+    -> (OSStatus, Data?)
+  {
     var item: CFTypeRef?
-    let query: [String: Any] = [
+    var query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: service, kSecAttrAccount as String: "tokens",
       kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne,
     ]
-    if SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-      let data = item as? Data, let stored = try? JSONDecoder().decode(Tokens.self, from: data),
+    if !allowInteraction {
+      let context = LAContext()
+      context.interactionNotAllowed = true
+      query[kSecUseAuthenticationContext as String] = context
+    }
+    let result = SecItemCopyMatching(query as CFDictionary, &item)
+    return (result, item as? Data)
+  }
+
+  @discardableResult private func applyStoredTokens(_ result: (OSStatus, Data?)) -> Bool {
+    if result.0 == errSecSuccess,
+      let data = result.1, let stored = try? JSONDecoder().decode(Tokens.self, from: data),
       stored.clientID == clientID
     {
       tokens = stored
       isConnected = true
       status = "Spotify connected"
+      return true
     }
+    if result.0 == errSecInteractionNotAllowed {
+      status = "Spotify login needs Keychain access — click Connect Spotify"
+    }
+    return false
   }
 
   func showConnectionPrompt() {
     guard !isConnecting else { return }
+    if !isConnected,
+      applyStoredTokens(Self.readStoredTokens(service: service, allowInteraction: true)) { return }
     let alert = NSAlert()
     alert.messageText = "Connect Spotify"
     alert.informativeText =

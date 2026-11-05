@@ -1,15 +1,46 @@
 import AppKit
 import Combine
 import CoreAudio
+import IOBluetooth
 import SwiftUI
 
 // MARK: - System Audio Outputs
+
+/// Match the audio route to its paired device by address, never by a similar model name.
+struct BluetoothOutputNaming {
+  static func address(in identifier: String) -> String? {
+    let pattern = "(?i)^(?:(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}|[0-9a-f]{12})(?=$|:output$|:input$)"
+    guard let range = identifier.range(of: pattern, options: .regularExpression) else { return nil }
+    return identifier[range].lowercased().filter { $0.isHexDigit }
+  }
+
+  static func name(audioName: String, uid: String, pairedNames: [String: String]) -> String {
+    guard let address = address(in: uid), let name = pairedNames[address],
+      !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return audioName }
+    return preferredName(audioName: audioName, bluetoothName: name)
+  }
+
+  static func preferredName(audioName: String, bluetoothName: String) -> String {
+    // Bluetooth can revert to a model label on connection while Core Audio keeps the user's name.
+    let generic: Set<String> = ["airpods", "airpods2", "airpods3", "airpods4", "airpods4anc",
+      "airpods4withactivenoisecancellation", "airpodspro", "airpodspro2", "airpodspro3", "airpodsmax"]
+    func modelName(_ name: String) -> Bool {
+      generic.contains(name.lowercased().filter { $0.isLetter || $0.isNumber })
+    }
+    let audioName = audioName.trimmingCharacters(in: .whitespacesAndNewlines)
+    let bluetoothName = bluetoothName.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !audioName.isEmpty && !modelName(audioName) { return audioName }
+    if !bluetoothName.isEmpty && !modelName(bluetoothName) { return bluetoothName }
+    return audioName.isEmpty ? bluetoothName : audioName
+  }
+}
 
 struct AudioOutputDevice: Identifiable {
   let id: AudioDeviceID
   let name: String
   let symbol: String
   let nativeIcon: NSImage?
+  var bluetoothAddress: String? = nil
 }
 
 @MainActor
@@ -64,6 +95,13 @@ final class AudioOutputs: ObservableObject {
       error = "Could not read audio outputs (\(status))"
       return
     }
+    var pairedNames: [String: String] = [:]
+    for device in IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] ?? [] {
+      if let rawAddress = device.addressString,
+        let address = BluetoothOutputNaming.address(in: rawAddress), let name = device.name {
+        pairedNames[address] = name
+      }
+    }
     devices = ids.filter { id in
       outputChannels(id) > 0 && integer(id, kAudioDevicePropertyDeviceIsAlive) != 0
         && integer(id, kAudioDevicePropertyIsHidden) != 1
@@ -71,13 +109,15 @@ final class AudioOutputs: ObservableObject {
           id, kAudioDevicePropertyDeviceCanBeDefaultDevice,
           scope: kAudioDevicePropertyScopeOutput) != 0
     }.map { id in
-      let name = string(id, kAudioObjectPropertyName) ?? "Audio output"
+      let audioName = string(id, kAudioObjectPropertyName) ?? "Audio output"
+      let uid = string(id, kAudioDevicePropertyDeviceUID) ?? ""
+      let name = BluetoothOutputNaming.name(audioName: audioName, uid: uid, pairedNames: pairedNames)
       let model = string(id, kAudioDevicePropertyModelUID) ?? ""
       let transport = integer(id, kAudioDevicePropertyTransportType) ?? 0
       return AudioOutputDevice(
         id: id, name: name,
         symbol: Self.symbol(name: name, model: model, transport: transport),
-        nativeIcon: icon(id))
+        nativeIcon: icon(id), bluetoothAddress: BluetoothOutputNaming.address(in: uid))
     }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     if started {
       observe(system, kAudioHardwarePropertyDevices)

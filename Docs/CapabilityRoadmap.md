@@ -27,7 +27,7 @@ The user's supplied Notchy feature list is the capability benchmark. It is not e
 
 ## Current baseline
 
-The repo has a modular island, compact spacing, a smaller side capsule, an event queue, volume observation, an unlocked music-scene preview and local LRC parsing. Real lockscreen rendering/interactivity, online lyrics, brightness, calls/messages, nearby AirPods, notification history, weather and WidgetKit extensions are not implemented. Charge-threshold alerts must remain separate from the removed persistent battery activity.
+The repo has a modular island, compact spacing, a smaller side capsule, an event queue, volume observation, an unlocked music-scene preview and local LRC parsing. Experimental real-lockscreen panels, optional LRCLIB lyrics, brightness-key feedback, paired-AirPods connection and widget service adapters are implemented; see LockScreenImplementation.md for their limits. Real locked-screen interaction and hardware behavior remain unverified. FaceTime/Phone now has a user-triggered Accessibility diagnostic and sample call popup; automatic detection and call actions are not implemented. Messages, nearby AirPods, notification history and WidgetKit extensions remain unimplemented. Live WeatherKit needs provisioning. Charge-threshold alerts must remain separate from the removed persistent battery activity.
 
 ## Sources inspected
 

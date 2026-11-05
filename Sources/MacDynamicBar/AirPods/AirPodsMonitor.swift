@@ -9,7 +9,7 @@ struct AirPodsIdentity: Equatable {
   /// SDP Device ID is used when cached; names are a fallback for unavailable records.
   /// Unknown products are ignored rather than presenting every Bluetooth device as AirPods.
   static func resolve(name: String, vendor: Int? = nil, product: Int? = nil) -> AirPodsIdentity? {
-    let normalized = name.lowercased().replacingOccurrences(of: " ", with: "")
+    let normalized = name.lowercased().filter { !$0.isWhitespace }
     let appleProduct = vendor == 0x004C || vendor == 0x05AC
     // Known Bluetooth product IDs. New devices can still resolve through their name.
     let symbols: [Int: String] = [
@@ -60,6 +60,7 @@ struct AirPodsConnectionPolicy {
 final class AirPodsMonitor: NSObject, ObservableObject {
   @Published private(set) var status = "AirPods connection monitoring is off"
   var onEvent: ((IslandPopup) -> Void)?
+  var nameForAddress: ((String) -> String?)?
   var isSelectedForOutput: ((String) -> Bool)?
   private var connection: IOBluetoothUserNotification?
   private var disconnections: [String: IOBluetoothUserNotification] = [:]
@@ -87,6 +88,10 @@ final class AirPodsMonitor: NSObject, ObservableObject {
   }
 
   private func seedConnectedDevices() {
+    settleTasks.values.forEach { $0.cancel() }
+    settleTasks.removeAll()
+    disconnections.values.forEach { $0.unregister() }
+    disconnections.removeAll()
     let devices = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] ?? []).filter {
       $0.isConnected()
     }
@@ -111,15 +116,14 @@ final class AirPodsMonitor: NSObject, ObservableObject {
       do { try await Task.sleep(for: .milliseconds(600)) } catch { return }
       guard let self, self.started, box.device.isConnected() else { return }
       defer { self.settleTasks.removeValue(forKey: address) }
-      let name = box.device.name ?? ""
-      let record = box.device.getServiceRecord(for: IOBluetoothSDPUUID(uuid16: 0x1200))
-      let vendor = record?.getAttributeDataElement(0x0201)?.getNumberValue()?.intValue
-      let product = record?.getAttributeDataElement(0x0202)?.getNumberValue()?.intValue
-      guard let identity = AirPodsIdentity.resolve(name: name, vendor: vendor, product: product)
+      guard var identity = AirPodsIdentity.resolve(device: box.device)
       else { return }
+      if let name = self.nameForAddress?(address) {
+        identity = AirPodsIdentity(name: name, symbol: identity.symbol)
+      }
       if let popup = self.policy.connected(
         address, identity: identity,
-        selectedForOutput: self.isSelectedForOutput?(name) ?? false)
+        selectedForOutput: self.isSelectedForOutput?(identity.name) ?? false)
       {
         self.onEvent?(popup)
       }
@@ -163,4 +167,14 @@ final class AirPodsMonitor: NSObject, ObservableObject {
 /// after callback handoff happen there. IOBluetooth manages the object's lifetime.
 private struct BluetoothDeviceReference: @unchecked Sendable {
   let device: IOBluetoothDevice
+}
+
+@MainActor extension AirPodsIdentity {
+  /// Use the same cached SDP identity in both the event monitor and paired-device picker.
+  static func resolve(device: IOBluetoothDevice) -> AirPodsIdentity? {
+    let record = device.getServiceRecord(for: IOBluetoothSDPUUID(uuid16: 0x1200))
+    return resolve(name: device.name ?? "",
+      vendor: record?.getAttributeDataElement(0x0201)?.getNumberValue()?.intValue,
+      product: record?.getAttributeDataElement(0x0202)?.getNumberValue()?.intValue)
+  }
 }

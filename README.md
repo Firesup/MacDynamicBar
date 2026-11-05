@@ -17,7 +17,7 @@ The active source is the complete `Sources/MacDynamicBar` directory. SwiftPM com
 
 ## Feature branch and structure
 
-Work is on `feat/island-events`. Commit `e020c7e` checkpoints the working music island before changes; `4ca3a6a` splits it without changing behavior (all 19 existing tests passed at that checkpoint).
+Current work is on `feat/lockscreen-player`; earlier event work was on `feat/island-events`. Commit `e020c7e` checkpoints the working music island before changes; `4ca3a6a` splits it without changing behavior (all 19 existing tests passed at that checkpoint).
 
 - `App/`: startup and menu bar.
 - `Island/`: shared surface, shape, animation, display windows, hover state, visibility, and coordination.
@@ -148,3 +148,32 @@ Settings → **Lock Screen → Lock Screen Player (Experimental)** enables an ac
 Additional controls include a battery widget, deadline timer, Calendar and Reminders connection/visibility controls, WeatherKit coordinate inputs, experimental brightness-key feedback and paired-AirPods connection. WeatherKit requires signed/provisioned capability support; the ad-hoc build is not provisioned for it. Nearby case discovery, per-bud battery, Focus, messaging/call adapters, notification history and actual WidgetKit extensions are unfinished. Do not interpret this build as completion of the full five-phase roadmap.
 
 No automated lock/password test has been performed. Disable other lockscreen overlays (e.g. Canopy) before comparing this build with the supplied reference. A true 1:1 match and actual locked-screen input routing must still be verified on hardware.
+
+
+## November 3 continuation
+
+The lockscreen player now uses the same responsive geometry for drawing and pointer hit regions, including lyrics, on small/offset displays. Expansion state belongs to each display panel. Changing display preferences rebuilds the locked panels after settings settle; stopping the controller clears lock state. Widget-strip width is bounded by the selected display.
+
+AirPods settings now load paired devices on opening, use the same cached SDP identity as the connection monitor (including renamed devices), keep stable device rows and verify the device's connected state after a connection attempt. Wake reseeding cancels pending connection events and replaces old disconnect listeners. Nearby discovery and battery reporting remain unfinished.
+
+The development bundle includes a generated blue fish icon, with matching template menu and settings symbols. `scripts/build-app.sh` generates all icon sizes, packages `Minnow.icns`, and signs the complete bundle. Apple's `iconutil` may require execution outside a restricted sandbox.
+
+Events → **Phone Calls (Experimental)** has an explicit Accessibility access button, a bounded FaceTime/Phone UI inspection and an incoming-call preview. Inspection runs off the main thread, reports only control evidence, and does not save caller details or execute call actions. English answer/decline/end-call labels are unverified heuristics; unsupported/localized controls remain unavailable. This is a diagnostic step, not background call monitoring or working answer/decline support. The Phone bundle on this Mac is `com.apple.mobilephone`.
+
+See [continuation validation](Docs/ContinuationValidation.md) for local checks and remaining hardware gates.
+
+
+### AirPods output names and capture permissions
+
+The output picker matches Bluetooth audio-route UIDs to paired-device addresses and keeps a personalized Core Audio name when available. If Core Audio only supplies a model label, it uses the matching personalized Bluetooth name (for example, `Abisan’s AirPods` rather than `AirPods 4 ANC`). Bluetooth can revert to a model name while connected; that model label must not overwrite a personalized audio-route name. The paired-device list and connection popup use the same matched route name. Unmatched devices retain their actual Core Audio name. It never guesses which of several paired AirPods belongs to a route.
+
+Media settings now show live capture status and full errors, with an Open Capture Settings button. Permission-denied errors are explained separately from other capture failures. Retry Audio Capture restarts capture without toggling the saved Live Waveform preference. Returning from settings also retries a failed capture if macOS's permission preflight succeeds.
+
+A development build can retain a stale permission entry after recompilation. If Screen & System Audio Recording already lists Minnow as enabled but the app reports ScreenCaptureKit error `-3801`, remove that Minnow entry and add the current workspace's `.build/Minnow.app`, then quit and reopen Minnow. Audio capture has not recovered merely because the switch is on: verify `Listening to Spotify`/`Listening to Music` and moving bars during playback.
+
+For consistent identity across builds, supply an installed code-signing certificate with `MINNOW_SIGN_IDENTITY="Apple Development: …" zsh scripts/build-app.sh`. Without one, the build script keeps using ad-hoc signing. No signing certificate or privacy permissions are created or changed by the build script.
+
+
+Optional Spotify credential restoration runs off the main thread with noninteractive authentication. A delayed macOS Keychain operation no longer blocks app launch, playback or capture; Connect Spotify can request access explicitly. Existing saved credentials are preserved.
+
+The final November 3 build was reauthorized through Screen & System Audio Recording, then verified live: the island reported **Listening to Spotify**, showed changing measured waveform bars, and identified the selected output as **Abisan’s AirPods**. Events also showed that personalized name with Connected status. No further binary rebuild was performed after the successful permission grant.

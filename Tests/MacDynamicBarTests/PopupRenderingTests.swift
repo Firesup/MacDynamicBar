@@ -11,7 +11,7 @@ import Testing
     .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent(
       ".build/ui-checks")
   try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-  for kind: IslandPopup.Kind in [.airPods, .lowBattery, .charging, .notification] {
+  for kind: IslandPopup.Kind in [.airPods, .lowBattery, .charging, .notification, .phoneCall] {
     let popup = IslandPopup.preview(kind)
     #expect(NSImage(systemSymbolName: popup.symbol, accessibilityDescription: nil) != nil)
     let renderer = ImageRenderer(

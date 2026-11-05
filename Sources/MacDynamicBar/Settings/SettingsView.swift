@@ -92,7 +92,7 @@ struct MinnowSettingsView: View {
     NavigationSplitView {
       VStack(spacing: 18) {
         HStack(spacing: 10) {
-          Image(systemName: "waveform").font(.title2).foregroundStyle(.white)
+          Image(systemName: "fish.fill").font(.title2).foregroundStyle(.white)
             .frame(width: 38, height: 38)
             .background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
           VStack(alignment: .leading, spacing: 2) {
@@ -182,7 +182,7 @@ struct MinnowSettingsView: View {
   private var general: some View {
     Group {
       VStack(spacing: 10) {
-        Image(systemName: "waveform").font(.system(size: 36, weight: .medium))
+        Image(systemName: "fish.fill").font(.system(size: 36, weight: .medium))
           .frame(width: 78, height: 78).background(.white.opacity(0.07), in: Circle())
         Text("A little space for your music.").font(.title3.bold())
         Text("Personalize the island, your displays, and everyday interactions.")
@@ -257,6 +257,7 @@ struct MinnowSettingsView: View {
         "Experimental player over the real macOS lockscreen. Native date/time and authentication remain handled by macOS. Enable, then lock your Mac to test."
     ) {
       Toggle("Lock Screen Player (Experimental)", isOn: $settings.lockScreenPlayer)
+      LockScreenStatusView(controller: coordinator.lockScreen)
       Toggle("Online Lyrics · LRCLIB", isOn: $settings.onlineLyrics)
       note(
         "Online lyrics sends the current track title, artist, album and duration to lrclib.net. The lockscreen panel does not replace authentication. Turn it off here to disable it."
@@ -288,7 +289,7 @@ struct MinnowSettingsView: View {
       ) {
         Toggle("AirPods Connections", isOn: $settings.airPodsPopups)
         AirPodsMonitorStatus(monitor: coordinator.airPods)
-        AirPodsConnectionsView()
+        AirPodsConnectionsView(outputs: coordinator.session.outputs)
         note(
           "Shows connections to this Mac. Connecting does not necessarily select the device as audio output."
         )
@@ -307,6 +308,10 @@ struct MinnowSettingsView: View {
         )
         Toggle("Brightness Key HUD (Experimental)", isOn: $settings.brightnessHUD)
         Button("Preview Volume HUD") { coordinator.preview(.hud) }
+      }
+      SettingsGroup("Phone Calls (Experimental)") {
+        PhoneCallProbeView()
+        Button("Preview Incoming Call") { coordinator.preview(.phoneCall) }
       }
       SettingsGroup("Live Activities") {
         Toggle("Show Activities", isOn: $settings.showActivities)
@@ -384,6 +389,7 @@ struct MinnowSettingsView: View {
       ) {
         Toggle("Live Waveform", isOn: $settings.audioReactive)
         Button("Retry Audio Capture") { coordinator.retryCapture() }
+        AudioCaptureStatusView(audio: coordinator.session.audio)
       }
       SettingsGroup("Behaviour") {
         Toggle("Collapse on Pause", isOn: $settings.collapseOnPause)
