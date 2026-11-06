@@ -7,11 +7,13 @@ import SwiftUI
 @MainActor
 final class IslandWindowController {
   private let panel = IslandPanel()
+  private let shelf: ShelfStore
+  private let today: TodayServices
   private let activities: ActivityStore
   private let capsule = ActivityCapsule()
   private let popups: PopupCoordinator
   var onInteractionChanged: (() -> Void)?
-  var isInteractionBusy: Bool { state.isInteractionBusy }
+  var isInteractionBusy: Bool { state.isInteractionBusy || shelf.isInteractionBusy }
   private let state: IslandState
   private var configuration: IslandConfiguration
   private let settings: MinnowSettings
@@ -32,9 +34,11 @@ final class IslandWindowController {
 
   init(
     session: IslandMediaSession, settings: MinnowSettings, popups: PopupCoordinator,
-    activities: ActivityStore,
+    activities: ActivityStore, today: TodayServices, shelf: ShelfStore,
     displayID: CGDirectDisplayID
   ) {
+    self.shelf = shelf
+    self.today = today
     self.activities = activities
     self.popups = popups
     self.settings = settings
@@ -58,7 +62,9 @@ final class IslandWindowController {
     player.$track.map { $0 != nil }.removeDuplicates().sink { [weak self] visible in
       guard let self, var layout = self.layout else { return }
       layout.showsMiniPlayer =
-        visible || (self.settings.showActivities && self.activities.primary != nil)
+        (visible && self.settings.mediaEnabled)
+        || (self.settings.todayEnabled || self.settings.shelfEnabled)
+        || (self.settings.showActivities && self.activities.primary != nil)
       self.layout = layout
       self.updateRootView()
       self.resize(presentation: self.state.presentation)
@@ -75,7 +81,8 @@ final class IslandWindowController {
       guard let self else { return }
       if var layout = self.layout {
         layout.showsMiniPlayer =
-          self.player.track != nil
+          (self.player.track != nil && self.settings.mediaEnabled) || self.settings.todayEnabled
+          || self.settings.shelfEnabled
           || (self.settings.showActivities && self.activities.primary != nil)
         self.layout = layout
         self.updateRootView()
@@ -86,12 +93,20 @@ final class IslandWindowController {
     player.$isPlaying.receive(on: RunLoop.main).sink { [weak self] _ in
       self?.updateActivityCapsule()
     }.store(in: &subscriptions)
+    shelf.objectWillChange.receive(on: RunLoop.main).sink { [weak self] in
+      self?.onInteractionChanged?()
+    }.store(in: &subscriptions)
     installMonitors()
   }
 
   func refreshMusic() { player.refresh() }
   var isVisible: Bool { isShown }
   func collapse() { state.collapse() }
+  func collapseMedia() {
+    state.collapseForPausedMedia(
+      mediaEnabled: settings.mediaEnabled, todayEnabled: settings.todayEnabled,
+      shelfEnabled: settings.shelfEnabled)
+  }
 
   func applySettings(reposition: Bool = false) {
     let nextTuning = [settings.notchWidthOffset, settings.notchHeightOffset]
@@ -135,7 +150,8 @@ final class IslandWindowController {
       screenFrame: screen.frame, notchWidth: max(80, notchWidth + settings.notchWidthOffset),
       notchHeight: max(
         20, (hasNotch ? screen.safeAreaInsets.top : 28) + settings.notchHeightOffset),
-      showsMiniPlayer: player.track != nil
+      showsMiniPlayer: (player.track != nil && settings.mediaEnabled) || settings.todayEnabled
+        || settings.shelfEnabled
         || (settings.showActivities && activities.primary != nil), notchCenterX: notchCenterX,
       configuration: configuration)
     self.layout = layout
@@ -143,7 +159,7 @@ final class IslandWindowController {
     let root = IslandView(
       state: state, player: player, audio: audio,
       accessories: accessories, outputs: outputs, popups: popups, activities: activities,
-      settings: settings, layout: layout
+      settings: settings, today: today, shelf: shelf, layout: layout
     )
     let host: IslandHostingView
     if let existing = hostingView {
@@ -221,7 +237,7 @@ final class IslandWindowController {
     hostingView?.host.rootView = IslandView(
       state: state, player: player, audio: audio,
       accessories: accessories, outputs: outputs, popups: popups, activities: activities,
-      settings: settings, layout: layout
+      settings: settings, today: today, shelf: shelf, layout: layout
     )
   }
 

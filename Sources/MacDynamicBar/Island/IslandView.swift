@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Island Interface
 
@@ -13,6 +14,10 @@ struct IslandView: View {
   @ObservedObject var popups: PopupCoordinator
   @ObservedObject var activities: ActivityStore
   @ObservedObject var settings: MinnowSettings
+
+  @ObservedObject var today: TodayServices
+  @ObservedObject var shelf: ShelfStore
+  @State private var shelfDropTargeted = false
 
   let layout: IslandLayout
 
@@ -44,21 +49,33 @@ struct IslandView: View {
             .frame(
               width: layout.size(for: .expanded).width,
               height: min(88, layout.configuration.expandedContentHeight))
-        } else if settings.showActivities, !player.isPlaying || !settings.mediaEnabled,
-          let activity = activities.primary
-        {
-          ActivityDetailView(activity: activity)
-            .frame(
-              width: layout.size(for: .expanded).width,
-              height: layout.configuration.expandedContentHeight
-            )
-            .opacity(state.isExpanded ? 1 : 0).allowsHitTesting(state.isExpanded)
-            .accessibilityHidden(!state.isExpanded)
         } else {
-          MusicView(
-            state: state, player: player, audio: audio, accessories: accessories,
-            outputs: outputs, settings: settings
-          )
+          VStack(spacing: 0) {
+            if settings.todayEnabled || settings.shelfEnabled {
+              TodayPageSwitch(state: state, settings: settings)
+            }
+            if state.effectivePage(
+              mediaEnabled: settings.mediaEnabled, todayEnabled: settings.todayEnabled,
+              shelfEnabled: settings.shelfEnabled) == .today
+            {
+              TodayView(
+                calendar: today.calendar, reminders: today.reminders, state: state, now: today.now)
+            } else if state.effectivePage(
+              mediaEnabled: settings.mediaEnabled, todayEnabled: settings.todayEnabled,
+              shelfEnabled: settings.shelfEnabled) == .shelf
+            {
+              ShelfView(shelf: shelf)
+            } else if settings.showActivities, !player.isPlaying || !settings.mediaEnabled,
+              let activity = activities.primary
+            {
+              ActivityDetailView(activity: activity)
+            } else if settings.mediaEnabled {
+              MusicView(
+                state: state, player: player, audio: audio, accessories: accessories,
+                outputs: outputs, settings: settings)
+              Spacer(minLength: 0)
+            }
+          }
           .frame(
             width: layout.size(for: .expanded).width,
             height: layout.configuration.expandedContentHeight
@@ -74,8 +91,21 @@ struct IslandView: View {
     }
     .environment(\.islandTextContrast, textContrast)
     .preferredColorScheme(.dark)
+    .onDrop(of: [UTType.fileURL.identifier], isTargeted: $shelfDropTargeted) { providers in
+      guard settings.shelfEnabled, popups.active == nil else { return false }
+      state.finishShelfDrop(accepted: true)
+      Task { await shelf.importFiles(providers) }
+      return true
+    }
+    .onChange(of: shelfDropTargeted) { _, targeted in
+      if targeted && settings.shelfEnabled && popups.active == nil {
+        state.beginShelfDrop()
+      } else {
+        state.finishShelfDrop(accepted: false)
+      }
+    }
     .onChange(of: state.isExpanded) { _, expanded in
-      if expanded { accessories.refresh() }
+      if expanded && settings.mediaEnabled { accessories.refresh() }
     }
   }
 
@@ -90,7 +120,19 @@ struct IslandView: View {
         {
           Image(systemName: activity.symbol).font(.system(size: 13)).foregroundStyle(.green).frame(
             maxWidth: .infinity)
-        } else if popups.active == nil, !state.isExpanded, player.track != nil, settings.artwork {
+        } else if popups.active == nil, !state.isExpanded, settings.shelfEnabled,
+          state.page == .shelf
+        {
+          Image(systemName: "tray").font(.system(size: 13, weight: .medium))
+            .foregroundStyle(.white).frame(maxWidth: .infinity)
+        } else if popups.active == nil, !state.isExpanded, settings.todayEnabled,
+          !settings.mediaEnabled || !player.isPlaying || state.page == .today
+        {
+          Image(systemName: "calendar").font(.system(size: 13, weight: .medium))
+            .foregroundStyle(.white).frame(maxWidth: .infinity)
+        } else if popups.active == nil, !state.isExpanded, settings.mediaEnabled,
+          player.track != nil, settings.artwork
+        {
           AlbumCover(
             image: player.artwork,
             size: min(20, layout.notchHeight - 6)
@@ -140,7 +182,7 @@ struct IslandView: View {
         ? "Dismiss popup" : (state.isExpanded ? "Collapse Minnow" : "Expand Minnow")
     )
     .help(
-      player.track == nil
+      !settings.mediaEnabled || player.track == nil
         ? "Expand Minnow"
         : "\(player.title) — \(player.subtitle)"
     )

@@ -1,25 +1,28 @@
 import AppKit
 import Combine
 import CoreLocation
-import EventKit
 import WeatherKit
 
 @MainActor final class WidgetServices: ObservableObject {
   @Published var weather = "Weather not configured"
   @Published var weatherSymbol = "cloud"
-  @Published var nextEvent = "Calendar not connected"
-  @Published var reminders = "Reminders not connected"
+  let today: TodayServices
+  private var todaySubscription: AnyCancellable?
+  // Compatibility summaries are derived from the very same typed snapshots.
+  var nextEvent: String {
+    today.calendar.snapshot.state.message ?? today.calendar.snapshot.events.first?.title ?? "No upcoming events today"
+  }
+  var reminders: String {
+    today.reminders.snapshot.state.message ?? "\(today.reminders.snapshot.items.count) incomplete reminders"
+  }
   @Published var timerEnd: Date?
   @Published var latitude = ""
   @Published var longitude = ""
-  private let store = EKEventStore()
-  private var observer: NSObjectProtocol?
   private var weatherTask: Task<Void, Never>?
   private var weatherRequest: Task<Void, Never>?
-  init() {
-    observer = NotificationCenter.default.addObserver(
-      forName: .EKEventStoreChanged, object: nil, queue: .main
-    ) { [weak self] _ in MainActor.assumeIsolated { self?.refreshEvents() } }
+  init(settings: MinnowSettings = .shared) {
+    today = TodayServices(settings: settings)
+    todaySubscription = today.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
   }
   func refreshWeather() {
     guard let lat = Double(latitude), let lon = Double(longitude), (-90...90).contains(lat),
@@ -48,52 +51,12 @@ import WeatherKit
       }
     }
   }
-  func connectCalendar() {
-    Task { @MainActor in
-      do {
-        if try await store.requestFullAccessToEvents() {
-          refreshEvents()
-        } else {
-          nextEvent = "Calendar access denied"
-        }
-      } catch { nextEvent = "Calendar unavailable" }
-    }
-  }
-  func connectReminders() {
-    Task { @MainActor in
-      do {
-        if try await store.requestFullAccessToReminders() {
-          refreshEvents()
-        } else {
-          reminders = "Reminders access denied"
-        }
-      } catch { reminders = "Reminders unavailable" }
-    }
-  }
-  func refreshEvents() {
-    if EKEventStore.authorizationStatus(for: .event) == .fullAccess {
-      let now = Date.now
-      let predicate = store.predicateForEvents(
-        withStart: now, end: now.addingTimeInterval(86400), calendars: nil)
-      nextEvent =
-        store.events(matching: predicate).filter { $0.endDate > now }.sorted {
-          $0.startDate < $1.startDate
-        }.first?.title ?? "No upcoming events"
-    }
-    if EKEventStore.authorizationStatus(for: .reminder) == .fullAccess {
-      store.fetchReminders(
-        matching: store.predicateForIncompleteReminders(
-          withDueDateStarting: nil, ending: nil, calendars: nil)
-      ) { [weak self] entries in
-        let count = entries?.count ?? 0
-        Task { @MainActor [weak self] in self?.reminders = "\(count) reminders" }
-      }
-    }
-  }
+  func connectCalendar() { today.connectCalendar() }
+  func connectReminders() { today.connectReminders() }
+  func refreshEvents() { today.refresh() }
   func stop() {
     weatherTask?.cancel()
     weatherRequest?.cancel()
-    if let observer { NotificationCenter.default.removeObserver(observer) }
-    observer = nil
+    today.stop()
   }
 }

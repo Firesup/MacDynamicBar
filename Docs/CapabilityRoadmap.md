@@ -2,7 +2,7 @@
 
 The user's supplied Notchy feature list is the capability benchmark. It is not evidence that every feature shares the same API, permission model or reliability. Feature status must distinguish advertised behavior, independently inspected implementation and hardware verification. Preserve the native presentation and modular structure as these integrations are added.
 
-## Order and completion gates
+## Earlier research tracks (retained for context)
 
 | Phase | Work | Completion gate |
 |---|---|---|
@@ -27,7 +27,7 @@ The user's supplied Notchy feature list is the capability benchmark. It is not e
 
 ## Current baseline
 
-The repo has a modular island, compact spacing, a smaller side capsule, an event queue, volume observation, an unlocked music-scene preview and local LRC parsing. Experimental real-lockscreen panels, optional LRCLIB lyrics, brightness-key feedback, paired-AirPods connection and widget service adapters are implemented; see LockScreenImplementation.md for their limits. Real locked-screen interaction and hardware behavior remain unverified. FaceTime/Phone now has a user-triggered Accessibility diagnostic and sample call popup; automatic detection and call actions are not implemented. Messages, nearby AirPods, notification history and WidgetKit extensions remain unimplemented. Live WeatherKit needs provisioning. Charge-threshold alerts must remain separate from the removed persistent battery activity.
+The repo has a modular island, compact spacing, a smaller side capsule, an event queue, volume observation, an unlocked music-scene preview, local LRC parsing, and the Calendar/Reminders Today milestone described below. Experimental real-lockscreen panels, optional LRCLIB lyrics, brightness-key feedback, paired-AirPods connection and widget service adapters are implemented; see LockScreenImplementation.md for their limits. Real locked-screen interaction and hardware behavior remain unverified. FaceTime/Phone now has a user-triggered Accessibility diagnostic and sample call popup; automatic detection and call actions are not implemented. Messages, nearby AirPods, notification history and WidgetKit extensions remain unimplemented. Live WeatherKit needs provisioning. Charge-threshold alerts must remain separate from the removed persistent battery activity.
 
 ## Sources inspected
 
@@ -36,3 +36,31 @@ The repo has a modular island, compact spacing, a smaller side capsule, an event
 - LRCLIB API documentation (including client identification and response schema): https://lrclib.net/docs and https://lrclib.net/docs.md
 - Apple WidgetKit placements: https://developer.apple.com/documentation/widgetkit/widgets-and-complications-collection
 - Actual lockscreen probe source and caveats: see LockscreenResearch.md.
+
+
+## Current delivery milestones — November 5, 2026
+
+Calendar/Reminders is the first product milestone in this continuation. The older numbered research tracks above are not a claim that their hardware gates have passed.
+
+| Milestone | Scope | Status / acceptance gate |
+|---|---|---|
+| 1 · Calendar and Reminders | Typed EventKit snapshots; Today page; explicit connection; independent enable and persisted calendar/list selection; due, overdue and undated reminders; explicit completion with failure recovery | Implemented in this working tree. Automated validation and manual permission/hardware gates are recorded in CalendarReminders.md and ContinuationValidation.md. |
+| 2 · Shelf | File drag/drop, thumbnails, persisted security-scoped file access, native AirDrop sharing | Implemented in this working tree after the Calendar milestone check-in. Defaults off. Native drag/thumbnail/AirDrop hardware acceptance remains manual; see Shelf.md. |
+| 3 · Camera mirror | On-demand preview with explicit camera permission; release the capture session on dismissal | Pending. No background camera capture. |
+| 4 · Display profiles | Per-display sizing, stable identifiers, disconnect/reconnect fallback | Pending. Existing display selection and sizing remain. |
+| 5 · Island gestures | Configurable gestures scoped to the island hit region | Pending. Preserve native interactions elsewhere. |
+| 6 · Transient power indicators | Optional charging and percentage presentation | Pending. Preserve the absence of persistent battery activities. |
+| 7 · Bluetooth events | Broader connect/disconnect events; batteries only from verified sources | Pending. Preserve personalized AirPods naming and current connection handling. |
+| 8 · Production weather | WeatherKit provisioning, location selection, attribution, caching and freshness | Pending. Existing development adapter is not production readiness. |
+| 9 · Layout presets | Presets and module ordering | Pending. Calendar milestone uses only Music/Today, without a freeform editor. |
+| 10 · HUD compatibility | Capability-checked HUD replacement; native suppression and keyboard-backlight research | Pending. Existing volume observation and experimental brightness feedback do not replace macOS HUDs. |
+| 11 · Real lock screen | Actual lock/unlock, authentication routing, controls, sleep/wake and displays | Pending hardware validation. An unlocked scene is not evidence. |
+| 12 · Extensions | Third-party contracts after internal interfaces stabilize | Pending. No executable extension API is exposed yet. |
+
+## Boring Notch behavior reference and licensing boundary
+
+Reference: [Boring Notch README](https://github.com/TheBoredTeam/boring.notch/blob/main/README.md), reviewed November 5, 2026. Only its public behavior/feature descriptions were used; no GPL implementation was copied or translated. Minnow's EventKit adapter and state services are independent Apple-API implementations.
+
+- Upstream's checked/implemented feature list includes playback, Calendar, Reminders, mirror, charging percentage, gestures, Shelf/AirDrop, sizing and system HUD replacements. This is upstream's published implementation status, not a claim that we ran or verified its runtime behavior.
+- Upstream's unchecked roadmap includes broader Bluetooth activity, weather, customizable layout, lock-screen widgets and extensions. Those items are not evidence of implemented upstream behavior.
+- Minnow's completion gates are its own: a similarly named feature or upstream checkbox does not establish Minnow's permissions, reliability, visual equivalence or hardware compatibility.

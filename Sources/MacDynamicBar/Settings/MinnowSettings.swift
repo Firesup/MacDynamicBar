@@ -95,6 +95,16 @@ final class MinnowSettings: ObservableObject {
   @Published var lockWeather: Bool { didSet { save("lockWeather", lockWeather) } }
   @Published var lockCalendar: Bool { didSet { save("lockCalendar", lockCalendar) } }
   @Published var lockReminders: Bool { didSet { save("lockReminders", lockReminders) } }
+  @Published var calendarEnabled: Bool { didSet { save("todayCalendarEnabled", calendarEnabled) } }
+  @Published var remindersEnabled: Bool { didSet { save("todayRemindersEnabled", remindersEnabled) } }
+  @Published var selectedCalendars: TodaySelection {
+    didSet { save("todayCalendarSelection", try! JSONEncoder().encode(selectedCalendars)) }
+  }
+  @Published var selectedReminderLists: TodaySelection {
+    didSet { save("todayReminderSelection", try! JSONEncoder().encode(selectedReminderLists)) }
+  }
+  @Published var shelfEnabled: Bool { didSet { save("minnowShelfEnabled", shelfEnabled) } }
+  var todayEnabled: Bool { calendarEnabled || remindersEnabled }
   @Published var brightnessHUD: Bool { didSet { save("brightnessHUD", brightnessHUD) } }
   init(defaults: UserDefaults = .standard) {
     self.defaults = defaults
@@ -115,6 +125,13 @@ final class MinnowSettings: ObservableObject {
     lockWeather = bool("lockWeather", false)
     lockCalendar = bool("lockCalendar", false)
     lockReminders = bool("lockReminders", false)
+    shelfEnabled = bool("minnowShelfEnabled", false)
+    calendarEnabled = bool("todayCalendarEnabled", bool("lockCalendar", false))
+    remindersEnabled = bool("todayRemindersEnabled", bool("lockReminders", false))
+    selectedCalendars = defaults.data(forKey: "todayCalendarSelection")
+      .flatMap { try? JSONDecoder().decode(TodaySelection.self, from: $0) } ?? .all
+    selectedReminderLists = defaults.data(forKey: "todayReminderSelection")
+      .flatMap { try? JSONDecoder().decode(TodaySelection.self, from: $0) } ?? .all
     brightnessHUD = bool("brightnessHUD", false)
     chargingPopups = bool("minnowChargingPopups", true)
     showMenuBar = bool("showMinnowMenuBar", true)
@@ -168,10 +185,16 @@ final class MinnowSettings: ObservableObject {
       value.expandedWidth = expandedWidth
       value.expandedContentHeight = expandedHeight
     }
+    if todayEnabled || shelfEnabled { value.expandedContentHeight = max(232, value.expandedContentHeight + 28) }
     return value
   }
 
   func resetPreferences() {
+    shelfEnabled = false
+    calendarEnabled = false
+    remindersEnabled = false
+    selectedCalendars = .all
+    selectedReminderLists = .all
     brightnessHUD = false
     lockBattery = true
     lockWeather = false

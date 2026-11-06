@@ -145,7 +145,7 @@ See [LockScreenImplementation.md](Docs/LockScreenImplementation.md) for the exac
 
 Settings → **Lock Screen → Lock Screen Player (Experimental)** enables an actual lock-state-driven overlay. The glass media card expands artwork when pressed and provides a lyrics toggle. **Online Lyrics · LRCLIB** is optional and sends track metadata to that service. **Open Music Scene Preview** remains an unlocked preview, separate from the real lockscreen panel.
 
-Additional controls include a battery widget, deadline timer, Calendar and Reminders connection/visibility controls, WeatherKit coordinate inputs, experimental brightness-key feedback and paired-AirPods connection. WeatherKit requires signed/provisioned capability support; the ad-hoc build is not provisioned for it. Nearby case discovery, per-bud battery, Focus, messaging/call adapters, notification history and actual WidgetKit extensions are unfinished. Do not interpret this build as completion of the full five-phase roadmap.
+Settings → Today independently enables Calendar and Reminders and selects calendars/lists, with explicit Connect actions. The island Music/Today switch shows ongoing/upcoming events today, due/overdue and undated reminders, and reminder completion controls with save-error recovery. Today remains available with Media disabled or paused. The lock-screen strip shares these snapshots and keeps its separate privacy opt-ins. See [Calendar and Reminders](Docs/CalendarReminders.md) for lifecycle and manual acceptance details. Additional controls include a battery widget, deadline timer, WeatherKit coordinate inputs, experimental brightness-key feedback and paired-AirPods connection. WeatherKit requires signed/provisioned capability support; the ad-hoc build is not provisioned for it. Nearby case discovery, per-bud battery, Focus, messaging/call adapters, notification history and actual WidgetKit extensions are unfinished. Do not interpret this build as completion of the full five-phase roadmap.
 
 No automated lock/password test has been performed. Disable other lockscreen overlays (e.g. Canopy) before comparing this build with the supplied reference. A true 1:1 match and actual locked-screen input routing must still be verified on hardware.
 
@@ -177,3 +177,15 @@ For consistent identity across builds, supply an installed code-signing certific
 Optional Spotify credential restoration runs off the main thread with noninteractive authentication. A delayed macOS Keychain operation no longer blocks app launch, playback or capture; Connect Spotify can request access explicitly. Existing saved credentials are preserved.
 
 The final November 3 build was reauthorized through Screen & System Audio Recording, then verified live: the island reported **Listening to Spotify**, showed changing measured waveform bars, and identified the selected output as **Abisan’s AirPods**. Events also showed that personalized name with Connected status. No further binary rebuild was performed after the successful permission grant.
+
+
+### Run from VS Code
+
+Open the repository folder (the one containing `Package.swift`) in VS Code. With `Sources/MacDynamicBar/App/MacDynamicBar.swift` open, choose **Debug Minnow** in Run and Debug and press **F5**, or **Control+F5** to run without debugging. The build task compiles the whole Swift package, packages/signs `.build/Minnow.app`, and launches its executable. This source file is the app entry point; it depends on the other package files and is not a standalone Swift script.
+
+**Release Minnow** builds the optimized app; **Minnow Settings Preview** opens isolated settings without starting the coordinator. Launch/task paths use `${workspaceFolder}` and do not depend on the folder being named MacDynamicBar or Minnow. The Swift extension's automatic launch-config generation is disabled for this workspace so it does not replace these bundle-aware configurations.
+
+
+### Shelf
+
+Settings → Shelf enables an optional file shelf. Add local files/folders with the native picker or drag them onto the island. Shelf shows Quick Look thumbnails, retains bookmark-based file access across launches, supports dragging references back out, and opens native AirDrop sharing only from its share button. Removing a Shelf entry does not delete its original file. Shelf defaults off and never appears on the lock screen. See [Shelf implementation and validation](Docs/Shelf.md).

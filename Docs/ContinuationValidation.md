@@ -58,3 +58,65 @@ Final verification:
 - No binary rebuild followed the successful final permission grant. Stable certificate signing remains the longer-term way to avoid permission churn during development.
 
 These observations supersede the earlier follow-up notes saying permission refresh and connected-route verification were pending. Full reconnect popup timing, real lockscreen interaction and sleep/wake still retain their separate hardware gates.
+
+
+## Calendar/Reminders milestone — November 5, 2026
+
+Working folder: `/Users/ab/Developer/Minnow` (renamed by the user after saving the working checkout). Branch remains `feat/lockscreen-player` at `602b91324a92850744806beca506f62a0d7be7d2`, with reviewable uncommitted changes. No commit or push was made. The unrelated Developer/MacDynamicBar checkout with its staged additions was left untouched; the older Documents/Codex checkout was also inspected and was clean at the reviewed baseline.
+
+Automated verification:
+
+- Before implementation: all 51 baseline tests passed, including compilation. The initial default compiler-cache invocation was sandbox-blocked; using the repository build script's workspace-local caches succeeded.
+- After implementation: all 67 tests passed. New tests cover persisted empty/missing selections, migration of existing opt-ins, 23/25-hour calendar days, event end/midnight filtering, date-only/timed/time-zone/undated reminders, all permission states, denied-content clearing, explicit completion and injected save failure, read-only controls, stale calendar/reminder results, Media-disabled presentation, popup deferral/page restoration, lifecycle notifications and stop/restart.
+- Native AppKit-hosted renders visually reviewed: `.build/ui-checks/today.png` at 320 points and `.build/ui-checks/today-island.png` on the actual island surface at 408 points. The latter shows camera header clearance and the Today switch with Music disabled. Test data is synthetic. Native hosting was used because SwiftUI ImageRenderer does not reliably capture this scroll view.
+- `zsh scripts/build-app.sh` succeeded. `codesign --verify --deep --strict .build/Minnow.app`, Info.plist lint and `git diff --check` passed.
+
+Live visual check: launched this folder's built app using `--settings-preview` (isolated preferences, no coordinator startup/device monitoring). Selected Today and inspected independent enable/Connect/source controls and separate lock-screen privacy switches. No Connect or reminder completion button was pressed; no new privacy permission was requested or changed. This checks Settings layout, not real EventKit account behavior. The unlocked offscreen island render is not real lock-screen validation.
+
+Remaining manual gates are listed in CalendarReminders.md: actual grants/denials/revocation, account/list changes and provider errors, real reminder completion, notch/VoiceOver/scroll interaction and popup timing, date/time changes, sleep/wake, and genuine locked-screen privacy/panel routing. Existing audio capture recovery, personalized AirPods naming and lyrics were preserved; this milestone does not replace their hardware validation.
+
+
+## Workspace rename and Shelf continuation — November 5, 2026
+
+The VS Code launch failure was caused by `${workspaceFolder:MacDynamicBar}` after the directory became `Minnow`. Launch/task settings now use `${workspaceFolder}` and explicit bundle build tasks. Debug Minnow, Release Minnow and an isolated Settings preview run the packaged executable with its Info.plist. The build script supports debug/release and atomically replaces the executable. Automatic Swift launch-config generation is disabled locally; unrelated editor settings were retained. With `Sources/MacDynamicBar/App/MacDynamicBar.swift` open, F5 visibly built the app and started a running debugger session. This confirms the source-project launch path; the entry point still requires its Swift package, rather than single-file script execution.
+
+After the user requested continuing onward, Shelf was added as a separate default-off milestone. The complete suite now has **79 passing tests**, with no compiler warnings in the final test log. Calendar tests remain green. `.build/ui-checks/shelf.png` was reviewed at 320 points; its share control uses a verified system symbol. No test opens a source file in another app or sends data through AirDrop. The native bookmark round-trip test creates/removes only its own temporary fixture.
+
+Later computer-use attempts returned `cgWindowNotFound` for VS Code, so the live screen walkthrough could not be continued at that point. This is not evidence of a lock-screen result. Real Finder drag/drop, provider thumbnails and AirDrop hardware behavior remain manual acceptance gates in Shelf.md. The earlier live Today Settings and F5 launch observations remain valid; they preceded the Shelf build.
+
+
+Final delivery checks: the app was rebuilt after Shelf integration using `zsh scripts/build-app.sh`; the development signature passed `codesign --verify --deep --strict`, the built Info.plist passed lint, VS Code launch/tasks JSON parsed, the build script passed `zsh -n`, and `git diff --check` passed. The final executable is `.build/Minnow.app/Contents/MacOS/MacDynamicBar`. The Release configuration is provided but was not exercised in the live debugger check. No commit or push was performed.
+
+### Changed files in this continuation
+
+- `.vscode/launch.json`
+- `.vscode/settings.json`
+- `Docs/CapabilityRoadmap.md`
+- `Docs/ContinuationValidation.md`
+- `Docs/LockScreenImplementation.md`
+- `Docs/LockscreenFollowup.md`
+- `README.md`
+- `Sources/MacDynamicBar/Island/IslandCoordinator.swift`
+- `Sources/MacDynamicBar/Island/IslandState.swift`
+- `Sources/MacDynamicBar/Island/IslandView.swift`
+- `Sources/MacDynamicBar/Island/IslandWindowController.swift`
+- `Sources/MacDynamicBar/Settings/MinnowSettings.swift`
+- `Sources/MacDynamicBar/Settings/SettingsView.swift`
+- `Sources/MacDynamicBar/Widgets/WidgetServices.swift`
+- `Support/Info.plist`
+- `scripts/build-app.sh`
+- `.vscode/tasks.json`
+- `Docs/CalendarReminders.md`
+- `Docs/Shelf.md`
+- `Sources/MacDynamicBar/Shelf/ShelfFiles.swift`
+- `Sources/MacDynamicBar/Shelf/ShelfStore.swift`
+- `Sources/MacDynamicBar/Shelf/ShelfView.swift`
+- `Sources/MacDynamicBar/Today/CalendarService.swift`
+- `Sources/MacDynamicBar/Today/EventKitTodayStore.swift`
+- `Sources/MacDynamicBar/Today/ReminderService.swift`
+- `Sources/MacDynamicBar/Today/TodayModels.swift`
+- `Sources/MacDynamicBar/Today/TodayServices.swift`
+- `Sources/MacDynamicBar/Today/TodaySettingsView.swift`
+- `Sources/MacDynamicBar/Today/TodayView.swift`
+- `Tests/MacDynamicBarTests/ShelfTests.swift`
+- `Tests/MacDynamicBarTests/TodayTests.swift`

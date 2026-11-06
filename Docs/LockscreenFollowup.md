@@ -31,3 +31,8 @@ These sources were inspected for API/lifecycle behavior. No third-party implemen
 ## Verification
 
 Automated checks cover lifecycle ordering, missing lock evidence, sleep/wake, user switching, explicit/canonical unlock, notice parsing and existing geometry/interaction behavior. Native hardware results will be recorded here after the new build is exercised. An unlocked Music Scene is not verification of actual lockscreen visibility or input routing.
+
+
+## Calendar/Reminders continuation — November 5, 2026
+
+CalendarService and ReminderService now publish typed snapshots from one EventKit store. WidgetServices derives the existing lock strip's summaries from those snapshots. The desktop Today page and its enable/source preferences do not change lockCalendar or lockReminders privacy opt-ins. Reminder completion is a desktop user control; the lock strip remains noninteractive. Actual locked-screen privacy and interaction remain hardware gates, independent of the desktop/native render checks in ContinuationValidation.md.

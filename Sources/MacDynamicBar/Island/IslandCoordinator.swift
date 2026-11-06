@@ -10,7 +10,8 @@ final class IslandCoordinator {
   let popups = PopupCoordinator()
   let activities = ActivityStore()
   let sceneWidgets = MusicSceneWidgets()
-  let widgets = WidgetServices()
+  let shelf = ShelfStore()
+  let widgets: WidgetServices
   lazy var lockScreen = LockScreenController(
     session: session, settings: settings, widgets: widgets, readings: sceneWidgets)
   private var musicScene: MusicSceneWindow?
@@ -30,6 +31,7 @@ final class IslandCoordinator {
 
   init(settings: MinnowSettings) {
     self.settings = settings
+    widgets = WidgetServices(settings: settings)
     battery.onSnapshot = { [weak self] in
       self?.sceneWidgets.battery = $0
     }
@@ -67,6 +69,8 @@ final class IslandCoordinator {
       .receive(on: RunLoop.main)
       .sink { [weak self] _ in self?.playbackChanged() }
       .store(in: &subscriptions)
+    shelf.setEnabled(settings.shelfEnabled)
+    widgets.today.start()
     session.start()
     volumeHUD.start()
     lockScreen.onPresentationChanged = { [weak self] in self?.reconcileDisplays() }
@@ -78,6 +82,8 @@ final class IslandCoordinator {
   func applySettings() {
     popups.displayDuration = settings.popupDuration
     session.apply(settings)
+    shelf.setEnabled(settings.shelfEnabled)
+    widgets.today.applySettings()
     if settings.islandEnabled && !previouslyEnabled { hiddenAfterPause = false }
     previouslyEnabled = settings.islandEnabled
     if !settings.hideOnPause { hiddenAfterPause = false }
@@ -144,14 +150,19 @@ final class IslandCoordinator {
     }
     let visible =
       settings.islandEnabled && sessionActive && systemAwake
-      && (popups.active != nil || (settings.showActivities && activities.primary != nil)
-        || (settings.mediaEnabled && !hiddenAfterPause))
+      && IslandContentPolicy.hasContent(
+        mediaEnabled: settings.mediaEnabled,
+        hiddenAfterPause: hiddenAfterPause, todayEnabled: settings.todayEnabled,
+        hasPopup: popups.active != nil,
+        hasActivity: settings.showActivities && activities.primary != nil,
+        shelfEnabled: settings.shelfEnabled)
     var anyVisible = false
     for screen in screens {
       guard let id = MinnowDisplay.from(screen)?.nativeID else { continue }
       if controllers[id] == nil {
         controllers[id] = IslandWindowController(
           session: session, settings: settings, popups: popups, activities: activities,
+          today: widgets.today, shelf: shelf,
           displayID: id)
         controllers[id]?.onInteractionChanged = { [weak self] in self?.updatePopupPolicy() }
       }
@@ -169,6 +180,7 @@ final class IslandCoordinator {
   }
 
   func refreshVisibility() {
+    widgets.today.refresh()
     session.audio.retryAfterPermissionChange()
     visibilityTask?.cancel()
     visibilityTask = Task { @MainActor [weak self] in
@@ -209,6 +221,7 @@ final class IslandCoordinator {
     started = false
     lockScreen.stop()
     widgets.stop()
+    shelf.stop()
     activities.clear()
     musicScene?.close()
     battery.stop()
@@ -270,7 +283,7 @@ final class IslandCoordinator {
       let first = min(collapse, hide)
       do { try await Task.sleep(for: .seconds(first)) } catch { return }
       guard let self, !self.session.player.isPlaying else { return }
-      if collapse <= hide { self.controllers.values.forEach { $0.collapse() } }
+      if collapse <= hide { self.controllers.values.forEach { $0.collapseMedia() } }
       if hide <= collapse {
         self.hiddenAfterPause = true
         self.reconcileDisplays()

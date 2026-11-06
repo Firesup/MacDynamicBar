@@ -6,10 +6,12 @@ import SwiftUI
 // MARK: - Native Settings Window
 
 enum SettingsPage: String, CaseIterable, Identifiable {
-  case general, playback, appearance, events, musicScene
+  case general, playback, today, shelf, appearance, events, musicScene
   var id: String { rawValue }
   var title: String {
     switch self {
+    case .shelf: "Shelf"
+    case .today: "Today"
     case .general: "General"
     case .playback: "Media"
     case .appearance: "Appearance"
@@ -19,6 +21,8 @@ enum SettingsPage: String, CaseIterable, Identifiable {
   }
   var symbol: String {
     switch self {
+    case .shelf: "tray"
+    case .today: "calendar"
     case .general: "gearshape"
     case .playback: "play.fill"
     case .appearance: "paintpalette"
@@ -28,6 +32,8 @@ enum SettingsPage: String, CaseIterable, Identifiable {
   }
   var keywords: String {
     switch self {
+    case .shelf: "files drag drop thumbnails bookmark airdrop share tray"
+    case .today: "calendar reminders lists connect permissions agenda overdue undated"
     case .musicScene: "lockscreen scene lyrics artwork clock widgets weather preview"
     case .events: "popups airpods headphones connection battery charging power preview alerts"
     case .general: "launch login startup display visibility fullscreen menu hover haptic reset"
@@ -143,6 +149,8 @@ struct MinnowSettingsView: View {
               case .general: general
               case .playback: playback
               case .appearance: appearance
+              case .shelf: ShelfSettingsView(settings: settings, shelf: coordinator.shelf)
+              case .today: TodaySettingsView(settings: settings, today: coordinator.widgets.today)
               case .events: events
               case .musicScene: musicSceneSettings
               }
@@ -670,9 +678,9 @@ private struct LockWidgetSettings: View {
       Button("Refresh Apple Weather") { widgets.refreshWeather() }
       Text("Requires WeatherKit-enabled signing. " + widgets.weather).font(.caption)
       Toggle("Calendar on Lock Screen", isOn: $settings.lockCalendar)
-      Button("Connect Calendar…") { widgets.connectCalendar() }
+
       Toggle("Reminders on Lock Screen", isOn: $settings.lockReminders)
-      Button("Connect Reminders…") { widgets.connectReminders() }
+      Text("Connect and select calendars and reminder lists in Today settings. Lock screen visibility remains opt-in.").font(.caption).foregroundStyle(.secondary)
       HStack {
         Button("Start 5-minute Timer") { widgets.timerEnd = .now.addingTimeInterval(300) }
         Button("Stop Timer") { widgets.timerEnd = nil }

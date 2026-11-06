@@ -1,24 +1,34 @@
 {
-    "configurations": [
-        {
-            "type": "swift",
-            "request": "launch",
-            "args": [],
-            "cwd": "${workspaceFolder:MacDynamicBar}",
-            "name": "Debug MacDynamicBar",
-            "target": "MacDynamicBar",
-            "configuration": "debug",
-            "preLaunchTask": "swift: Build Debug MacDynamicBar"
-        },
-        {
-            "type": "swift",
-            "request": "launch",
-            "args": [],
-            "cwd": "${workspaceFolder:MacDynamicBar}",
-            "name": "Release MacDynamicBar",
-            "target": "MacDynamicBar",
-            "configuration": "release",
-            "preLaunchTask": "swift: Build Release MacDynamicBar"
-        }
-    ]
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Minnow",
+      "type": "swift",
+      "request": "launch",
+      "program": "${workspaceFolder}/.build/Minnow.app/Contents/MacOS/MacDynamicBar",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "Minnow: Build App"
+    },
+    {
+      "name": "Release Minnow",
+      "type": "swift",
+      "request": "launch",
+      "program": "${workspaceFolder}/.build/Minnow.app/Contents/MacOS/MacDynamicBar",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "Minnow: Build Release App"
+    },
+    {
+      "name": "Minnow Settings Preview",
+      "type": "swift",
+      "request": "launch",
+      "program": "${workspaceFolder}/.build/Minnow.app/Contents/MacOS/MacDynamicBar",
+      "args": [
+        "--settings-preview"
+      ],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "Minnow: Build App"
+    }
+  ]
 }

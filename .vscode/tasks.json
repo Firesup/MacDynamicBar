@@ -1,0 +1,57 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Minnow: Build App",
+      "type": "process",
+      "command": "/bin/zsh",
+      "args": [
+        "${workspaceFolder}/scripts/build-app.sh"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "MINNOW_BUILD_CONFIGURATION": "debug"
+        }
+      },
+      "problemMatcher": [
+        "$swiftc"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      }
+    },
+    {
+      "label": "Minnow: Build Release App",
+      "type": "process",
+      "command": "/bin/zsh",
+      "args": [
+        "${workspaceFolder}/scripts/build-app.sh"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "MINNOW_BUILD_CONFIGURATION": "release"
+        }
+      },
+      "problemMatcher": [
+        "$swiftc"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": false
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      }
+    }
+  ]
+}
