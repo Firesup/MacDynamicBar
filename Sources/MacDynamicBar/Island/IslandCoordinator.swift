@@ -41,7 +41,6 @@ final class IslandCoordinator {
     airPods.onEvent = { [weak self] event in self?.submit(event) }
     airPods.nameForAddress = { [weak self] rawAddress in
       guard let address = BluetoothOutputNaming.address(in: rawAddress) else { return nil }
-      self?.session.outputs.reload()
       return self?.session.outputs.devices.first { $0.bluetoothAddress == address }?.name
     }
     airPods.isSelectedForOutput = { [weak self] name in
@@ -138,6 +137,8 @@ final class IslandCoordinator {
   }
 
   func reconcileDisplays(reposition: Bool = false) {
+    let timing = TransitionTiming("island state reconciliation")
+    defer { timing.end() }
     guard started || popups.active != nil || activities.primary != nil else {
       controllers.values.forEach { $0.hide() }
       return
@@ -191,6 +192,7 @@ final class IslandCoordinator {
 
   func setSystemAwake(_ awake: Bool) {
     systemAwake = awake
+    session.setSystemAwake(awake)
     if !awake {
       popups.clear()
       lockScreen.suspend()

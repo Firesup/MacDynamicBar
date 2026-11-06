@@ -4,7 +4,7 @@ import SwiftUI
 struct MusicView: View {
   @ObservedObject var state: IslandState
   @ObservedObject var player: MediaPlayer
-  @ObservedObject var audio: MusicAudioLevels
+  let audio: MusicAudioLevels
   @ObservedObject var accessories: PlayerAccessories
   @ObservedObject var outputs: AudioOutputs
   @ObservedObject var settings: MinnowSettings
@@ -47,15 +47,8 @@ struct MusicView: View {
             .foregroundStyle(textContrast.secondary)
             .lineLimit(1)
 
-          if let error = accessories.error {
-            Text(error).font(.system(size: 10, weight: .semibold))
-              .foregroundStyle(.orange).lineLimit(1).help(error)
-          } else if player.isPlaying && !audio.hasAudioSignal {
-            Text(audio.status)
-              .font(.system(size: 10, weight: .semibold))
-              .foregroundStyle(textContrast.secondary)
-              .lineLimit(1)
-              .help(audio.status)
+          if player.captureTarget.source == .spotify {
+            RemotePlaybackLabel(audio: audio, color: textContrast.secondary)
           }
         }
         .shadow(color: .black.opacity(textContrast.shadowOpacity), radius: 1.5, y: 1)
@@ -197,5 +190,16 @@ struct MusicView: View {
 
     return "\(value / 60):"
       + String(format: "%02d", value % 60)
+  }
+}
+
+private struct RemotePlaybackLabel: View {
+  @ObservedObject var audio: MusicAudioLevels
+  let color: Color
+  var body: some View {
+    if let name = audio.remotePlaybackName {
+      Text("Playing on " + name).font(.system(size: 10, weight: .semibold))
+        .foregroundStyle(color).lineLimit(1)
+    }
   }
 }

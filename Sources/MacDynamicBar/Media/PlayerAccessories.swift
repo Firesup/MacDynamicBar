@@ -106,7 +106,7 @@ final class PlayerAccessories: ObservableObject {
       do {
         if source == .appleMusic {
           guard let id = self.trackID, Self.validAppleID(id) else { return }
-          let result = try self.run(Self.appleStateScript(id: id))
+          let result = try await self.run(Self.appleStateScript(id: id))
           guard version == self.revision else { return }
           guard result.numberOfItems == 3 else {
             throw SpotifyAccountError.message(
@@ -116,7 +116,7 @@ final class PlayerAccessories: ObservableObject {
           self.shuffled = result.atIndex(2)?.booleanValue
           self.repeatOne = result.atIndex(3)?.booleanValue
         } else {
-          let result = try self.run(Self.spotifyShuffleScript)
+          let result = try await self.run(Self.spotifyShuffleScript)
           guard version == self.revision else { return }
           self.shuffled = result.booleanValue
           if self.account.isConnected {
@@ -180,7 +180,7 @@ final class PlayerAccessories: ObservableObject {
                 end tell
             end timeout
             """
-          guard try self.run(script).booleanValue else {
+          guard try await self.run(script).booleanValue else {
             throw SpotifyAccountError.message(
               "The song changed before the action completed. Try again.")
           }
@@ -192,7 +192,7 @@ final class PlayerAccessories: ObservableObject {
             }
             try await self.account.setSaved(newLiked, uri: id)
           case .shuffle:
-            _ = try self.run(
+            _ = try await self.run(
               """
               with timeout of 2 seconds
                   tell application id "com.spotify.client"
@@ -226,21 +226,17 @@ final class PlayerAccessories: ObservableObject {
     !value.isEmpty && value.allSatisfy { $0.isHexDigit }
   }
 
-  private func run(_ source: String) throws -> NSAppleEventDescriptor {
-    guard let script = NSAppleScript(source: source) else {
-      throw SpotifyAccountError.message("Could not prepare the player action")
-    }
-    var error: NSDictionary?
-    let result = script.executeAndReturnError(&error)
-    if let error {
-      let code = (error[NSAppleScript.errorNumber] as? NSNumber)?.intValue ?? 0
+  private func run(_ source: String) async throws -> NSAppleEventDescriptor {
+    let response = await PlaybackScriptWorker.shared.execute(source)
+    try Task.checkCancellation()
+    if let code = response.errorCode {
       if code == -1743 {
         throw SpotifyAccountError.message(
           "Allow Minnow access in System Settings → Privacy & Security → Automation")
       }
       throw SpotifyAccountError.message("The player could not complete the action (\(code))")
     }
-    return result
+    return response.value
   }
 
   static func appleStateScript(id: String) -> String {
@@ -296,6 +292,15 @@ struct PlayerActionButton: View {
           }
         }
       }
+    }
+  }
+}
+
+struct PlayerAccessoryDiagnostics: View {
+  @ObservedObject var accessories: PlayerAccessories
+  var body: some View {
+    if let error = accessories.error {
+      Text(error).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
     }
   }
 }

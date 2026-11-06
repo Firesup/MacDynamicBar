@@ -4,12 +4,37 @@ import Foundation
 /// Observes changes; never intercepts keys or changes system volume.
 @MainActor final class VolumeHUDMonitor {
   var onEvent: ((IslandPopup) -> Void)?
+  private let worker = VolumeHUDWorker()
+  private var generation = 0
+  func start() {
+    let version = generation
+    worker.queue.async { [worker, weak self] in
+      worker.onEvent = { [weak self] event in
+        Task { @MainActor in
+          guard let self, self.generation == version else { return }
+          self.onEvent?(event)
+        }
+      }
+      worker.start()
+    }
+  }
+  func stop() {
+    generation += 1
+    worker.queue.async { [worker] in worker.stop() }
+  }
+}
+
+private final class VolumeHUDWorker: @unchecked Sendable {
+  let queue = DispatchQueue(label: "com.minnow.volume-monitor")
+  var onEvent: (@Sendable (IslandPopup) -> Void)?
   private var listeners:
     [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
+  private var started = false
   private var last: Int?
   private var device: AudioObjectID = 0
   func start() {
-    guard listeners.isEmpty else { return }
+    guard !started else { return }
+    started = true
     watch(
       AudioObjectID(kAudioObjectSystemObject), selector: kAudioHardwarePropertyDefaultOutputDevice,
       scope: kAudioObjectPropertyScopeGlobal)
@@ -17,7 +42,7 @@ import Foundation
   }
   private func bindDevice() {
     for (id, var address, block) in listeners where id != AudioObjectID(kAudioObjectSystemObject) {
-      AudioObjectRemovePropertyListenerBlock(id, &address, .main, block)
+      AudioObjectRemovePropertyListenerBlock(id, &address, queue, block)
     }
     listeners.removeAll { $0.0 != AudioObjectID(kAudioObjectSystemObject) }
     var address = AudioObjectPropertyAddress(
@@ -39,8 +64,8 @@ import Foundation
     var address = AudioObjectPropertyAddress(
       mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain)
     let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-      MainActor.assumeIsolated {
-        guard let self else { return }
+      do {
+        guard let self, self.started else { return }
         if selector == kAudioHardwarePropertyDefaultOutputDevice {
           self.bindDevice()
           return
@@ -54,7 +79,7 @@ import Foundation
             symbol: value == 0 ? "speaker.slash.fill" : "speaker.wave.2.fill", percentage: value))
       }
     }
-    if AudioObjectAddPropertyListenerBlock(id, &address, .main, block) == noErr {
+    if AudioObjectAddPropertyListenerBlock(id, &address, queue, block) == noErr {
       listeners.append((id, address, block))
     }
   }
@@ -76,8 +101,9 @@ import Foundation
     return Int((min(1, max(0, value)) * 100).rounded())
   }
   func stop() {
+    started = false
     for (id, var address, block) in listeners {
-      AudioObjectRemovePropertyListenerBlock(id, &address, .main, block)
+      AudioObjectRemovePropertyListenerBlock(id, &address, queue, block)
     }
     listeners.removeAll()
     last = nil

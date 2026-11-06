@@ -27,6 +27,8 @@ final class AppleMusicPlayer: ObservableObject {
 
   private var artworkTrackID: String?
   private var isRefreshing = false
+  private var refreshPending = false
+  private var lifecycle = 0
 
   private let musicBundleID = "com.apple.Music"
 
@@ -73,7 +75,8 @@ final class AppleMusicPlayer: ObservableObject {
     )
   }
 
-  private func loadArtwork(for trackID: String) {
+  private func loadArtwork(for trackID: String) async {
+    let version = lifecycle
     // Never display the previous song's cover for a new song.
     artwork = nil
 
@@ -108,17 +111,9 @@ final class AppleMusicPlayer: ObservableObject {
       end timeout
       """
 
-    guard let script = NSAppleScript(source: source) else {
-      return
-    }
-
-    var error: NSDictionary?
-    let descriptor = script.executeAndReturnError(&error)
-
-    guard error == nil else { return }
-
-    // Missing artwork should not disable working playback controls.
-    artwork = NSImage(data: descriptor.data)
+    let response = await PlaybackScriptWorker.shared.execute(source)
+    guard version == lifecycle, !sessionLocked, response.errorCode == nil else { return }
+    artwork = NSImage(data: response.value.data)
   }
 
   var canControlPlayback: Bool {
@@ -126,16 +121,24 @@ final class AppleMusicPlayer: ObservableObject {
   }
 
   private var sessionLocked = false
-  func setSessionLocked(_ locked: Bool) { sessionLocked = locked }
+  func setSessionLocked(_ locked: Bool) {
+    if locked != sessionLocked { lifecycle += 1 }
+    sessionLocked = locked
+  }
 
   private func receivePlaybackNotice(_ notice: DesktopPlaybackNotice?) {
-    guard sessionLocked else { refresh(); return }
+    guard sessionLocked else {
+      refresh()
+      return
+    }
     guard let notice else { return }
     isMusicRunning = true
     let position = playbackPosition(at: .now)
     if let incoming = notice.track {
-      let sameTrack = (incoming.id != nil && incoming.id == track?.id)
-        || (incoming.title == track?.title && incoming.artist == track?.artist && incoming.album == track?.album)
+      let sameTrack =
+        (incoming.id != nil && incoming.id == track?.id)
+        || (incoming.title == track?.title && incoming.artist == track?.artist
+          && incoming.album == track?.album)
       if !sameTrack {
         artwork = nil
         duration = notice.duration ?? 0
@@ -164,7 +167,8 @@ final class AppleMusicPlayer: ObservableObject {
         object: nil,
         queue: .main
       ) { [weak self] notification in
-        let notice = DesktopPlaybackNotice(userInfo: notification.userInfo ?? [:], source: .appleMusic)
+        let notice = DesktopPlaybackNotice(
+          userInfo: notification.userInfo ?? [:], source: .appleMusic)
         MainActor.assumeIsolated {
           self?.receivePlaybackNotice(notice)
         }
@@ -182,6 +186,8 @@ final class AppleMusicPlayer: ObservableObject {
   }
 
   func stop() {
+    lifecycle += 1
+    refreshPending = false
     if let playbackObserver {
       DistributedNotificationCenter.default()
         .removeObserver(playbackObserver)
@@ -201,103 +207,120 @@ final class AppleMusicPlayer: ObservableObject {
   func refresh() {
     guard !sessionLocked else { return }
     // Prevent overlapping refreshes while AppleScript processes events.
-    guard !isRefreshing else { return }
-
+    guard !isRefreshing else {
+      refreshPending = true
+      return
+    }
     isRefreshing = true
-    defer {
-      isRefreshing = false
-      onChange?()
-    }
+    let version = lifecycle
+    Task { @MainActor in
+      defer {
+        isRefreshing = false
+        onChange?()
+        if refreshPending {
+          refreshPending = false
+          refresh()
+        }
+      }
 
-    isMusicRunning =
-      !NSRunningApplication
-      .runningApplications(
-        withBundleIdentifier: musicBundleID
+      isMusicRunning =
+        !NSRunningApplication
+        .runningApplications(
+          withBundleIdentifier: musicBundleID
+        )
+        .isEmpty
+
+      guard isMusicRunning else {
+        isPlaying = false
+        lastError = nil
+
+        // Preserve the last track and artwork when Music closes.
+        return
+      }
+
+      let snapshot = await execute(Self.snapshotScript)
+      guard version == lifecycle, !sessionLocked else { return }
+      guard !refreshPending else { return }
+      guard let result = snapshot else {
+        isPlaying = false
+        return
+      }
+
+      guard
+        let playbackState = result.atIndex(1)?.stringValue,
+        let title = result.atIndex(2)?.stringValue,
+        let artist = result.atIndex(3)?.stringValue,
+        let album = result.atIndex(4)?.stringValue,
+        let trackID = result.atIndex(5)?.stringValue
+      else {
+        isPlaying = false
+        lastError = "Could not read Apple Music"
+        return
+      }
+
+      isPlaying = playbackState == "playing"
+
+      guard playbackState != "stopped", !title.isEmpty else {
+        return
+      }
+
+      duration = max(
+        0,
+        result.atIndex(6)?.doubleValue ?? 0
       )
-      .isEmpty
 
-    guard isMusicRunning else {
-      isPlaying = false
-      lastError = nil
+      positionAtUpdate = max(
+        0,
+        result.atIndex(7)?.doubleValue ?? 0
+      )
 
-      // Preserve the last track and artwork when Music closes.
-      return
+      positionUpdatedAt = .now
+
+      // Avoid fetching the same artwork on every play/pause event.
+      // Retry on a later event if Music did not provide an image.
+      if artworkTrackID != trackID || artwork == nil {
+        await loadArtwork(for: trackID)
+        guard version == lifecycle, !sessionLocked else { return }
+        artworkTrackID = trackID
+      }
+
+      let updatedTrack = MusicTrack(
+        title: title,
+        artist: artist,
+        album: album,
+        id: trackID
+      )
+
+      if track != updatedTrack {
+        track = updatedTrack
+      }
     }
 
-    guard let result = execute(Self.snapshotScript) else {
-      isPlaying = false
-      return
-    }
-
-    guard
-      let playbackState = result.atIndex(1)?.stringValue,
-      let title = result.atIndex(2)?.stringValue,
-      let artist = result.atIndex(3)?.stringValue,
-      let album = result.atIndex(4)?.stringValue,
-      let trackID = result.atIndex(5)?.stringValue
-    else {
-      isPlaying = false
-      lastError = "Could not read Apple Music"
-      return
-    }
-
-    isPlaying = playbackState == "playing"
-
-    guard playbackState != "stopped", !title.isEmpty else {
-      return
-    }
-
-    duration = max(
-      0,
-      result.atIndex(6)?.doubleValue ?? 0
-    )
-
-    positionAtUpdate = max(
-      0,
-      result.atIndex(7)?.doubleValue ?? 0
-    )
-
-    positionUpdatedAt = .now
-
-    // Avoid fetching the same artwork on every play/pause event.
-    // Retry on a later event if Music did not provide an image.
-    if artworkTrackID != trackID || artwork == nil {
-      loadArtwork(for: trackID)
-      artworkTrackID = trackID
-    }
-
-    let updatedTrack = MusicTrack(
-      title: title,
-      artist: artist,
-      album: album,
-      id: trackID
-    )
-
-    if track != updatedTrack {
-      track = updatedTrack
-    }
   }
 
   func seek(to position: TimeInterval, expectedTrackID: String) {
-    guard canControlPlayback, !isRefreshing, track?.id == expectedTrackID,
+    guard canControlPlayback, track?.id == expectedTrackID,
       let command = DesktopSeek.make(
         source: .appleMusic, trackID: expectedTrackID,
         position: position, duration: duration)
     else { return }
-    isRefreshing = true
-    let result = execute(command.script)
-    isRefreshing = false
-    guard let result else {
+    let version = lifecycle
+    Task { @MainActor in
+      let result = await execute(command.script)
+      guard version == lifecycle, !sessionLocked, track?.id == expectedTrackID else { return }
+      guard let result else {
+        onChange?()
+        return
+      }
+      guard result.booleanValue else {
+        refresh()
+        return
+      }
+      positionAtUpdate = command.position
+      positionUpdatedAt = .now
       onChange?()
-      return
     }
-    guard result.booleanValue else {
-      refresh()
-      return
-    }
-    positionAtUpdate = command.position
-    positionUpdatedAt = .now
-    onChange?()
+
   }
 
   func togglePlayback() {
@@ -319,7 +342,7 @@ final class AppleMusicPlayer: ObservableObject {
   }
 
   private func send(_ command: Command) {
-    guard canControlPlayback, !isRefreshing else { return }
+    guard canControlPlayback else { return }
 
     // Command text comes only from the enum above.
     let source = """
@@ -332,14 +355,17 @@ final class AppleMusicPlayer: ObservableObject {
       end timeout
       """
 
-    isRefreshing = true
-    let result = execute(source)
-    isRefreshing = false
-    guard result != nil else {
-      onChange?()
-      return
+    let version = lifecycle
+    Task { @MainActor in
+      let result = await execute(source)
+      guard version == lifecycle, !sessionLocked else { return }
+      guard result != nil else {
+        onChange?()
+        return
+      }
+      refresh()
     }
-    refresh()
+
   }
 
   private func observeWorkspace(
@@ -375,18 +401,11 @@ final class AppleMusicPlayer: ObservableObject {
 
   private func execute(
     _ source: String
-  ) -> NSAppleEventDescriptor? {
-    guard let script = NSAppleScript(source: source) else {
-      lastError = "Could not prepare Music command"
-      return nil
-    }
-
-    var error: NSDictionary?
-    let result = script.executeAndReturnError(&error)
-
-    if let error {
-      let code = (error[NSAppleScript.errorNumber] as? NSNumber)?.intValue
-
+  ) async -> NSAppleEventDescriptor? {
+    let version = lifecycle
+    let response = await PlaybackScriptWorker.shared.execute(source)
+    guard version == lifecycle, !sessionLocked else { return nil }
+    if let code = response.errorCode {
       if code == -1743 {
         lastError = "Allow Music access in System Settings"
       } else {
@@ -397,7 +416,7 @@ final class AppleMusicPlayer: ObservableObject {
     }
 
     lastError = nil
-    return result
+    return response.value
   }
 
   private static let snapshotScript = """

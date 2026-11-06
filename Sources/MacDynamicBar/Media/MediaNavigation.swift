@@ -13,11 +13,25 @@ struct SpotifyPlaybackDetails: Decodable, Sendable {
     let explicit: Bool?
     let artists: [SpotifyArtistLink]?
   }
+  struct Device: Decodable, Sendable {
+    let id: String?
+    let name: String?
+    let type: String?
+  }
+  let device: Device?
+  let isPlaying: Bool?
+  init(repeatMode: String?, item: Item?, device: Device? = nil, isPlaying: Bool? = nil) {
+    self.repeatMode = repeatMode
+    self.item = item
+    self.device = device
+    self.isPlaying = isPlaying
+  }
   let repeatMode: String?
   let item: Item?
   enum CodingKeys: String, CodingKey {
     case repeatMode = "repeat_state"
-    case item
+    case item, device
+    case isPlaying = "is_playing"
   }
   var uri: String? { item?.uri }
   var explicit: Bool? { item?.explicit }
@@ -62,5 +76,26 @@ enum MediaNavigation {
     if !NSWorkspace.shared.open(url), let fallback = artistURL(name: name, uri: uri, web: true) {
       NSWorkspace.shared.open(fallback)
     }
+  }
+}
+
+/// Only a trusted Connect ID can establish local identity. A desktop name is not an ID.
+enum SpotifyPlaybackLocation: Equatable {
+  case unknown, local
+  case remote(String)
+  static func resolve(_ details: SpotifyPlaybackDetails, localDeviceID: String? = nil) -> Self {
+    guard details.isPlaying == true, let device = details.device,
+      let id = device.id, !id.isEmpty
+    else { return .unknown }
+    if let localDeviceID, id == localDeviceID { return .local }
+    // These device classes cannot be this Mac. All computer/unknown classes stay unknown.
+    let remoteTypes = [
+      "smartphone", "tablet", "speaker", "tv", "avr", "stb", "audiodongle", "gameconsole",
+      "castaudio", "castvideo",
+    ]
+    guard localDeviceID != nil || remoteTypes.contains(device.type?.lowercased() ?? ""),
+      let name = device.name, !name.isEmpty
+    else { return .unknown }
+    return .remote(name)
   }
 }

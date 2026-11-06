@@ -2,7 +2,7 @@ import AppKit
 import Combine
 import IOBluetooth
 
-struct AirPodsIdentity: Equatable {
+struct AirPodsIdentity: Equatable, Sendable {
   let name: String
   let symbol: String
 
@@ -57,105 +57,65 @@ struct AirPodsConnectionPolicy {
 }
 
 @MainActor
-final class AirPodsMonitor: NSObject, ObservableObject {
+final class AirPodsMonitor: ObservableObject {
   @Published private(set) var status = "AirPods connection monitoring is off"
   var onEvent: ((IslandPopup) -> Void)?
   var nameForAddress: ((String) -> String?)?
   var isSelectedForOutput: ((String) -> Bool)?
-  private var connection: IOBluetoothUserNotification?
-  private var disconnections: [String: IOBluetoothUserNotification] = [:]
-  private var settleTasks: [String: Task<Void, Never>] = [:]
+  private let worker = BluetoothMonitorWorker()
   private var wakeObserver: NSObjectProtocol?
   private var policy = AirPodsConnectionPolicy()
+  private var generation = 0
   private var started = false
 
   func start() {
     guard !started else { return }
     started = true
-    seedConnectedDevices()
-    connection = IOBluetoothDevice.register(
-      forConnectNotifications: self, selector: #selector(didConnect(_:device:)))
-    status =
-      connection == nil
-      ? "Bluetooth monitoring unavailable. Check macOS Privacy & Security → Bluetooth."
-      : "Listening for AirPods connections"
+    generation += 1
+    let version = generation
+    status = "Starting Bluetooth monitoring"
+    worker.queue.async { [worker, weak self] in
+      worker.onSeed = { [weak self] addresses in
+        Task { @MainActor in
+          guard let self, self.started, self.generation == version else { return }
+          self.policy.seed(addresses)
+        }
+      }
+      worker.onStatus = { [weak self] available in
+        Task { @MainActor in
+          guard let self, self.started, self.generation == version else { return }
+          self.status = available ? "Listening for AirPods connections" : "Bluetooth monitoring unavailable"
+        }
+      }
+      worker.onDevice = { [weak self] address, identity in
+        Task { @MainActor in
+          guard let self, self.started, self.generation == version else { return }
+          guard var identity else { self.policy.disconnected(address); return }
+          if let name = self.nameForAddress?(address) {
+            identity = AirPodsIdentity(name: name, symbol: identity.symbol)
+          }
+          if let popup = self.policy.connected(address, identity: identity,
+            selectedForOutput: self.isSelectedForOutput?(identity.name) ?? false) {
+            self.onEvent?(popup)
+          }
+        }
+      }
+      worker.start()
+    }
     wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
-      forName: NSWorkspace.didWakeNotification,
-      object: nil, queue: .main
+      forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
     ) { [weak self] _ in
-      MainActor.assumeIsolated { self?.seedConnectedDevices() }
-    }
-  }
-
-  private func seedConnectedDevices() {
-    settleTasks.values.forEach { $0.cancel() }
-    settleTasks.removeAll()
-    disconnections.values.forEach { $0.unregister() }
-    disconnections.removeAll()
-    let devices = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] ?? []).filter {
-      $0.isConnected()
-    }
-    policy.seed(Set(devices.compactMap(\.addressString)))
-    for device in devices { watchDisconnect(device) }
-  }
-
-  @objc nonisolated private func didConnect(
-    _ notification: IOBluetoothUserNotification, device: IOBluetoothDevice
-  ) {
-    // IOBluetooth callbacks need not arrive on the main thread.
-    let box = BluetoothDeviceReference(device: device)
-    Task { @MainActor [weak self] in self?.connected(box.device) }
-  }
-
-  private func connected(_ device: IOBluetoothDevice) {
-    guard started, let address = device.addressString else { return }
-    watchDisconnect(device)
-    settleTasks[address]?.cancel()
-    let box = BluetoothDeviceReference(device: device)
-    settleTasks[address] = Task { @MainActor [weak self] in
-      do { try await Task.sleep(for: .milliseconds(600)) } catch { return }
-      guard let self, self.started, box.device.isConnected() else { return }
-      defer { self.settleTasks.removeValue(forKey: address) }
-      guard var identity = AirPodsIdentity.resolve(device: box.device)
-      else { return }
-      if let name = self.nameForAddress?(address) {
-        identity = AirPodsIdentity(name: name, symbol: identity.symbol)
+      MainActor.assumeIsolated {
+        guard let self, self.started else { return }
+        self.worker.queue.async { [worker = self.worker] in worker.seed() }
       }
-      if let popup = self.policy.connected(
-        address, identity: identity,
-        selectedForOutput: self.isSelectedForOutput?(identity.name) ?? false)
-      {
-        self.onEvent?(popup)
-      }
-    }
-  }
-
-  private func watchDisconnect(_ device: IOBluetoothDevice) {
-    guard let address = device.addressString, disconnections[address] == nil else { return }
-    disconnections[address] = device.register(
-      forDisconnectNotification: self, selector: #selector(didDisconnect(_:device:)))
-  }
-
-  @objc nonisolated private func didDisconnect(
-    _ notification: IOBluetoothUserNotification, device: IOBluetoothDevice
-  ) {
-    let address = device.addressString
-    Task { @MainActor [weak self] in
-      guard let self, let address else { return }
-      self.policy.disconnected(address)
-      self.settleTasks.removeValue(forKey: address)?.cancel()
-      self.disconnections.removeValue(forKey: address)?.unregister()
     }
   }
 
   func stop() {
     started = false
-    connection?.unregister()
-    connection = nil
-    disconnections.values.forEach { $0.unregister() }
-    disconnections.removeAll()
-    settleTasks.values.forEach { $0.cancel() }
-    settleTasks.removeAll()
+    generation += 1
+    worker.queue.async { [worker] in worker.stop() }
     if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
     wakeObserver = nil
     policy = AirPodsConnectionPolicy()
@@ -163,17 +123,95 @@ final class AirPodsMonitor: NSObject, ObservableObject {
   }
 }
 
-/// Only transfers the Objective-C reference to the main actor; all device operations
-/// after callback handoff happen there. IOBluetooth manages the object's lifetime.
+/// Registration itself can wait on IOBluetooth's internal semaphore. Every Bluetooth call,
+/// including registration/unregistration, belongs to this queue, never the UI actor.
+private final class BluetoothMonitorWorker: NSObject, @unchecked Sendable {
+  let queue = DispatchQueue(label: "com.minnow.bluetooth-monitor")
+  var onSeed: (@Sendable (Set<String>) -> Void)?
+  var onStatus: (@Sendable (Bool) -> Void)?
+  var onDevice: (@Sendable (String, AirPodsIdentity?) -> Void)?
+  private var connection: IOBluetoothUserNotification?
+  private var disconnections: [String: IOBluetoothUserNotification] = [:]
+  private var revisions: [String: Int] = [:]
+  private var generation = 0
+  private var started = false
+
+  func start() {
+    guard !started else { return }
+    started = true
+    let timing = TransitionTiming("Bluetooth registration")
+    defer { timing.end() }
+    connection = IOBluetoothDevice.register(forConnectNotifications: self,
+      selector: #selector(didConnect(_:device:)))
+    onStatus?(connection != nil)
+    seed()
+  }
+
+  func seed() {
+    guard started else { return }
+    generation += 1
+    revisions.removeAll()
+    disconnections.values.forEach { $0.unregister() }
+    disconnections.removeAll()
+    let devices = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] ?? []).filter { $0.isConnected() }
+    onSeed?(Set(devices.compactMap(\.addressString)))
+    for device in devices { watchDisconnect(device) }
+  }
+
+  @objc private func didConnect(_ notification: IOBluetoothUserNotification, device: IOBluetoothDevice) {
+    let box = BluetoothDeviceReference(device: device)
+    queue.async { [weak self] in
+      guard let self, self.started, let address = box.device.addressString else { return }
+      self.watchDisconnect(box.device)
+      self.revisions[address, default: 0] += 1
+      let revision = self.revisions[address]
+      let version = self.generation
+      self.queue.asyncAfter(deadline: .now() + .milliseconds(600)) { [weak self] in
+        guard let self, self.started, self.generation == version,
+          self.revisions[address] == revision, box.device.isConnected(),
+          let identity = AirPodsIdentity.resolve(device: box.device) else { return }
+        self.onDevice?(address, identity)
+      }
+    }
+  }
+
+  private func watchDisconnect(_ device: IOBluetoothDevice) {
+    guard let address = device.addressString, disconnections[address] == nil else { return }
+    disconnections[address] = device.register(forDisconnectNotification: self,
+      selector: #selector(didDisconnect(_:device:)))
+  }
+
+  @objc private func didDisconnect(_ notification: IOBluetoothUserNotification, device: IOBluetoothDevice) {
+    let box = BluetoothDeviceReference(device: device)
+    queue.async { [weak self] in
+      guard let self, self.started, !box.device.isConnected(), let address = box.device.addressString else { return }
+      self.revisions[address, default: 0] += 1
+      self.disconnections.removeValue(forKey: address)?.unregister()
+      self.onDevice?(address, nil)
+    }
+  }
+
+  func stop() {
+    started = false
+    generation += 1
+    connection?.unregister()
+    connection = nil
+    disconnections.values.forEach { $0.unregister() }
+    disconnections.removeAll()
+    revisions.removeAll()
+  }
+}
+
 private struct BluetoothDeviceReference: @unchecked Sendable {
   let device: IOBluetoothDevice
 }
 
-@MainActor extension AirPodsIdentity {
+extension AirPodsIdentity {
   /// Use the same cached SDP identity in both the event monitor and paired-device picker.
   static func resolve(device: IOBluetoothDevice) -> AirPodsIdentity? {
     let record = device.getServiceRecord(for: IOBluetoothSDPUUID(uuid16: 0x1200))
-    return resolve(name: device.name ?? "",
+    return resolve(
+      name: device.name ?? "",
       vendor: record?.getAttributeDataElement(0x0201)?.getNumberValue()?.intValue,
       product: record?.getAttributeDataElement(0x0202)?.getNumberValue()?.intValue)
   }

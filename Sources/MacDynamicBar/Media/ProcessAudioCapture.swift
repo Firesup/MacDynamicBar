@@ -8,12 +8,18 @@ struct ProcessCaptureError: LocalizedError {
   var errorDescription: String? { "\(operation) failed (\(status))" }
 }
 
+protocol ProcessCapturing: AnyObject, Sendable {
+  func start(source: MusicSource, pid: pid_t?) async throws
+  func stop() async
+}
+
 /// Per-player output capture without screen/window enumeration. Does not mute or reroute playback.
 /// Hardware setup/teardown is confined to controlQueue; sample processing uses a separate serial queue.
 @available(macOS 14.2, *)
-final class ProcessAudioCapture: @unchecked Sendable {
+final class ProcessAudioCapture: ProcessCapturing, @unchecked Sendable {
   private let controlQueue = DispatchQueue(label: "com.minnow.process-audio.control")
-  private let sampleQueue = DispatchQueue(label: "com.minnow.process-audio.samples", qos: .userInteractive)
+  private let sampleQueue = DispatchQueue(
+    label: "com.minnow.process-audio.samples", qos: .userInteractive)
   private var tap: AudioObjectID = kAudioObjectUnknown
   private var aggregate: AudioObjectID = kAudioObjectUnknown
   private var ioProc: AudioDeviceIOProcID?
@@ -47,18 +53,25 @@ final class ProcessAudioCapture: @unchecked Sendable {
   }
 
   private func configure(source: MusicSource, pid: pid_t?) throws {
+    let timing = TransitionTiming("capture start")
+    defer { timing.end() }
+    cleanup()
     let description: CATapDescription
     if #available(macOS 26.0, *) {
       description = CATapDescription(stereoMixdownOfProcesses: [])
       description.bundleIDs = [source.bundleIdentifier]
       description.isProcessRestoreEnabled = true
     } else {
-      guard var pid else { throw ProcessCaptureError(operation: "Player process lookup", status: -1) }
+      guard var pid else {
+        throw ProcessCaptureError(operation: "Player process lookup", status: -1)
+      }
       var address = property(kAudioHardwarePropertyTranslatePIDToProcessObject)
       var process: AudioObjectID = kAudioObjectUnknown
       var size = UInt32(MemoryLayout<AudioObjectID>.size)
-      try check(AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address,
-        UInt32(MemoryLayout<pid_t>.size), &pid, &size, &process), "Player audio-process lookup")
+      try check(
+        AudioObjectGetPropertyData(
+          AudioObjectID(kAudioObjectSystemObject), &address,
+          UInt32(MemoryLayout<pid_t>.size), &pid, &size, &process), "Player audio-process lookup")
       guard process != kAudioObjectUnknown else {
         throw ProcessCaptureError(operation: "Player audio-process lookup", status: -1)
       }
@@ -72,9 +85,11 @@ final class ProcessAudioCapture: @unchecked Sendable {
     var format = AudioStreamBasicDescription()
     var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
     var formatAddress = property(kAudioTapPropertyFormat)
-    try check(AudioObjectGetPropertyData(tap, &formatAddress, 0, nil, &size, &format), "Read audio format")
+    try check(
+      AudioObjectGetPropertyData(tap, &formatAddress, 0, nil, &size, &format), "Read audio format")
     guard format.mFormatID == kAudioFormatLinearPCM,
-      format.mFormatFlags & kAudioFormatFlagIsFloat != 0, format.mBitsPerChannel == 32 else {
+      format.mFormatFlags & kAudioFormatFlagIsFloat != 0, format.mBitsPerChannel == 32
+    else {
       throw ProcessCaptureError(operation: "Unsupported audio-tap format", status: -1)
     }
 
@@ -84,22 +99,30 @@ final class ProcessAudioCapture: @unchecked Sendable {
       kAudioAggregateDeviceUIDKey: UUID().uuidString,
       kAudioAggregateDeviceIsPrivateKey: true,
       kAudioAggregateDeviceTapAutoStartKey: true,
-      kAudioAggregateDeviceTapListKey: [[
-        kAudioSubTapUIDKey: tapUID,
-        kAudioSubTapDriftCompensationKey: true,
-      ]],
+      kAudioAggregateDeviceTapListKey: [
+        [
+          kAudioSubTapUIDKey: tapUID,
+          kAudioSubTapDriftCompensationKey: true,
+        ]
+      ],
     ]
-    try check(AudioHardwareCreateAggregateDevice(configuration as CFDictionary, &aggregate),
+    try check(
+      AudioHardwareCreateAggregateDevice(configuration as CFDictionary, &aggregate),
       "Create private audio device")
     let sink = sink
-    try check(AudioDeviceCreateIOProcIDWithBlock(&ioProc, aggregate, sampleQueue) {
-      _, input, _, _, _ in sink.consume(input)
-    }, "Create audio callback")
-    guard let ioProc else { throw ProcessCaptureError(operation: "Create audio callback", status: -1) }
+    try check(
+      AudioDeviceCreateIOProcIDWithBlock(&ioProc, aggregate, sampleQueue) {
+        _, input, _, _, _ in sink.consume(input)
+      }, "Create audio callback")
+    guard let ioProc else {
+      throw ProcessCaptureError(operation: "Create audio callback", status: -1)
+    }
     try check(AudioDeviceStart(aggregate, ioProc), "Start audio tap")
   }
 
   private func cleanup() {
+    let timing = TransitionTiming("capture stop")
+    defer { timing.end() }
     if let ioProc, aggregate != kAudioObjectUnknown {
       AudioDeviceStop(aggregate, ioProc)
       AudioDeviceDestroyIOProcID(aggregate, ioProc)
@@ -112,7 +135,8 @@ final class ProcessAudioCapture: @unchecked Sendable {
   }
 
   private func property(_ selector: AudioObjectPropertySelector) -> AudioObjectPropertyAddress {
-    AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal,
+    AudioObjectPropertyAddress(
+      mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal,
       mElement: kAudioObjectPropertyElementMain)
   }
   private func check(_ status: OSStatus, _ operation: String) throws {

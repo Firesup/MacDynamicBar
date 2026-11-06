@@ -26,6 +26,22 @@ struct SurfaceSpring {
   }
 }
 
+private struct SurfaceRenderKey: Equatable {
+  let bounds: CGRect
+  let width: Double
+  let height: Double
+  let corner: Double
+  let expansion: Double
+  let shape: IslandShape
+  let appearance: IslandAppearanceLayout
+  let glass: Bool
+  let blur: Bool
+  let opacity: Double
+  let gradient: Double
+  let header: CGFloat
+  let reduceTransparency: Bool
+}
+
 /// The window never resizes during interactions. One backing surface owns
 /// the fill, clipping, content bounds and hit region on every animation tick.
 @MainActor
@@ -40,6 +56,7 @@ final class IslandHostingView: NSView {
   private let gradientSurface = CAGradientLayer()
   private var surfaceShape: IslandShape = .applePill
   private var ticker: Timer?
+  private var accessibilityObserver: NSObjectProtocol?
   private var lastTick = 0.0
   private var surfacePath = CGPath(rect: .zero, transform: nil)
   private var surfaceRect = CGRect.zero
@@ -55,6 +72,7 @@ final class IslandHostingView: NSView {
   private var backgroundOpacity = 1.0
   private var gradientVisibility = 0.45
   private var headerHeight: CGFloat = 28
+  private var lastSurfaceKey: SurfaceRenderKey?
 
   init(rootView: IslandView) {
     host = NSHostingView(rootView: rootView)
@@ -70,6 +88,16 @@ final class IslandHostingView: NSView {
       backdrop = blur
     }
     super.init(frame: .zero)
+    updateSurfaceAppearance()
+    accessibilityObserver = NSWorkspace.shared.notificationCenter.addObserver(
+      forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      MainActor.assumeIsolated {
+        self?.updateSurfaceAppearance()
+        self?.applySurface()
+      }
+    }
     wantsLayer = true
     surface.wantsLayer = true
     surface.layer?.backgroundColor = NSColor.black.cgColor
@@ -101,6 +129,18 @@ final class IslandHostingView: NSView {
     surface.addSubview(insetFinish)
     surface.addSubview(host)
     addSubview(surface)
+  }
+
+  private func updateSurfaceAppearance() {
+    appearance = NSAppearance(
+      named: NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+        ? .accessibilityHighContrastDarkAqua : .darkAqua)
+  }
+
+  isolated deinit {
+    if let accessibilityObserver {
+      NSWorkspace.shared.notificationCenter.removeObserver(accessibilityObserver)
+    }
   }
 
   func applyAppearance(
@@ -192,6 +232,13 @@ final class IslandHostingView: NSView {
   }
 
   private func applySurface() {
+    let key = SurfaceRenderKey(bounds: bounds, width: widthSpring.value, height: heightSpring.value,
+      corner: cornerSpring.value, expansion: expansionSpring.value, shape: surfaceShape,
+      appearance: appearanceLayout, glass: usesGlass, blur: usesBlur, opacity: backgroundOpacity,
+      gradient: gradientVisibility, header: headerHeight,
+      reduceTransparency: NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency)
+    guard key != lastSurfaceKey else { return }
+    lastSurfaceKey = key
     let size = CGSize(
       width: min(bounds.width, max(1, widthSpring.value)),
       height: min(bounds.height, max(1, heightSpring.value)))
@@ -226,6 +273,12 @@ final class IslandHostingView: NSView {
         NSColor.black.cgColor,
         NSColor.black.cgColor, NSColor.black.withAlphaComponent(lowerAlpha).cgColor,
       ]
+    } else if NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency {
+      blackShell.isHidden = true
+      insetFinish.isHidden = true
+      backdrop.isHidden = true
+      blurBackdrop.isHidden = true
+      surface.layer?.backgroundColor = NSColor.black.cgColor
     } else if appearanceLayout == .glassInset {
       // The shell has a real cutout. An opaque black backing behind the
       // glass would prevent the inset from sampling the wallpaper.

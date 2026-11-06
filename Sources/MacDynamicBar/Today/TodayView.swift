@@ -46,7 +46,8 @@ struct TodayView: View {
   }
   private func section(_ title: String, symbol: String, status: TodayLoadState) -> some View {
     VStack(alignment: .leading, spacing: 5) {
-      Label(title, systemImage: symbol).font(.system(size: 12, weight: .semibold))
+      Label(title, systemImage: symbol).foregroundStyle(Color.white).font(
+        .system(size: 12, weight: .semibold))
       if let message = status.message {
         HStack(spacing: 6) {
           if status == .loading { ProgressView().controlSize(.mini) }
@@ -144,9 +145,11 @@ struct TodayPageSwitch: View {
       state.isOutputPickerOpen = false
       state.page = page
     } label: {
-      Label(title, systemImage: symbol).font(.system(size: 11, weight: .semibold))
-        .padding(.horizontal, 9).padding(.vertical, 4)
-        .background(.white.opacity(selected ? 0.13 : 0), in: Capsule())
+      Label(title, systemImage: symbol).foregroundStyle(Color.white).font(
+        .system(size: 11, weight: .semibold)
+      )
+      .padding(.horizontal, 9).padding(.vertical, 4)
+      .background(.white.opacity(selected ? 0.13 : 0), in: Capsule())
     }.buttonStyle(.plain).disabled(!enabled)
       .accessibilityAddTraits(selected ? .isSelected : [])
   }

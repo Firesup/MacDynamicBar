@@ -16,14 +16,18 @@ struct BluetoothOutputNaming {
 
   static func name(audioName: String, uid: String, pairedNames: [String: String]) -> String {
     guard let address = address(in: uid), let name = pairedNames[address],
-      !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return audioName }
+      !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    else { return audioName }
     return preferredName(audioName: audioName, bluetoothName: name)
   }
 
   static func preferredName(audioName: String, bluetoothName: String) -> String {
     // Bluetooth can revert to a model label on connection while Core Audio keeps the user's name.
-    let generic: Set<String> = ["airpods", "airpods2", "airpods3", "airpods4", "airpods4anc",
-      "airpods4withactivenoisecancellation", "airpodspro", "airpodspro2", "airpodspro3", "airpodsmax"]
+    let generic: Set<String> = [
+      "airpods", "airpods2", "airpods3", "airpods4", "airpods4anc",
+      "airpods4withactivenoisecancellation", "airpodspro", "airpodspro2", "airpodspro3",
+      "airpodsmax",
+    ]
     func modelName(_ name: String) -> Bool {
       generic.contains(name.lowercased().filter { $0.isLetter || $0.isNumber })
     }
@@ -35,7 +39,7 @@ struct BluetoothOutputNaming {
   }
 }
 
-struct AudioOutputDevice: Identifiable {
+struct AudioOutputDevice: Identifiable, @unchecked Sendable {
   let id: AudioDeviceID
   let name: String
   let symbol: String
@@ -48,6 +52,108 @@ final class AudioOutputs: ObservableObject {
   @Published private(set) var devices: [AudioOutputDevice] = []
   @Published private(set) var selectedID: AudioDeviceID = 0
   @Published private(set) var error: String?
+  private let worker = AudioOutputWorker()
+  private var generation = 0
+  private var selectionGeneration = 0
+  private var selectionError: String?
+  private var refreshing = false
+  private var notificationTask: Task<Void, Never>?
+  private var started = false
+  var current: AudioOutputDevice? { devices.first { $0.id == selectedID } }
+  func start() {
+    guard !started else { return }
+    started = true
+    worker.queue.async { [worker, weak self] in
+      worker.onChange = { [weak self] in Task { @MainActor in self?.outputNotice() } }
+      worker.start()
+    }
+    reload()
+  }
+  func stop() {
+    notificationTask?.cancel()
+    notificationTask = nil
+    started = false
+    generation += 1
+    selectionGeneration += 1
+    worker.queue.async { [worker] in worker.stop() }
+  }
+  func finishStopping() async {
+    await withCheckedContinuation { continuation in
+      worker.queue.async { continuation.resume() }
+    }
+  }
+  private func outputNotice() {
+    guard started else { return }
+    generation += 1
+    notificationTask?.cancel()
+    notificationTask = Task { @MainActor [weak self] in
+      do { try await Task.sleep(for: .milliseconds(60)) } catch { return }
+      self?.reload()
+    }
+  }
+  func reload() {
+    guard started else { return }
+    generation += 1
+    guard !refreshing else { return }
+    refreshing = true
+    Task { @MainActor [weak self] in
+      guard let self else { return }
+      repeat {
+        let version = generation
+        let snapshot = await withCheckedContinuation { continuation in
+          worker.queue.async { [worker] in
+            worker.reload()
+            continuation.resume(
+              returning: OutputSnapshot(
+                devices: worker.devices,
+                selectedID: worker.selectedID, error: worker.error))
+          }
+        }
+        if version == generation {
+          if started {
+            devices = snapshot.devices
+            selectedID = snapshot.selectedID
+            error = snapshot.error ?? selectionError
+          }
+          break
+        }
+      } while started
+      refreshing = false
+    }
+  }
+  func select(_ device: AudioOutputDevice) {
+    guard started else { return }
+    generation += 1
+    selectionGeneration += 1
+    let version = selectionGeneration
+    selectionError = nil
+    error = nil
+    worker.queue.async { [worker, weak self] in
+      worker.select(device)
+      let failure = worker.error
+      Task { @MainActor in
+        guard let self, self.started, version == self.selectionGeneration else { return }
+        self.selectionError = failure
+        self.reload()
+      }
+    }
+  }
+  static func symbol(name: String, model: String, transport: UInt32) -> String {
+    AudioOutputWorker.symbol(name: name, model: model, transport: transport)
+  }
+}
+private struct OutputSnapshot: @unchecked Sendable {
+  let devices: [AudioOutputDevice]
+  let selectedID: AudioDeviceID
+  let error: String?
+}
+
+private final class AudioOutputWorker: @unchecked Sendable {
+  let queue = DispatchQueue(label: "com.minnow.outputs")
+  var onChange: (@Sendable () -> Void)?
+  var devices: [AudioOutputDevice] = []
+  var selectedID: AudioDeviceID = 0
+  var error: String?
   private var started = false
   private var listeners:
     [(
@@ -60,7 +166,8 @@ final class AudioOutputs: ObservableObject {
   func start() {
     guard !started else { return }
     started = true
-    reload()
+    observe(system, kAudioHardwarePropertyDevices)
+    observe(system, kAudioHardwarePropertyDefaultOutputDevice)
   }
   func stop() {
     started = false
@@ -68,7 +175,9 @@ final class AudioOutputs: ObservableObject {
   }
 
   func reload() {
-    removeListeners()
+    error = nil
+    let timing = TransitionTiming("output enumeration")
+    defer { timing.end() }
     selectedID = integer(system, kAudioHardwarePropertyDefaultOutputDevice) ?? 0
     var address = property(kAudioHardwarePropertyDevices)
     var size: UInt32 = 0
@@ -78,11 +187,8 @@ final class AudioOutputs: ObservableObject {
       return
     }
     guard size > 0 else {
+      updateObservedDevices([])
       devices = []
-      if started {
-        observe(system, kAudioHardwarePropertyDevices)
-        observe(system, kAudioHardwarePropertyDefaultOutputDevice)
-      }
       return
     }
     var ids = [AudioDeviceID](
@@ -95,10 +201,12 @@ final class AudioOutputs: ObservableObject {
       error = "Could not read audio outputs (\(status))"
       return
     }
+    updateObservedDevices(ids)
     var pairedNames: [String: String] = [:]
     for device in IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] ?? [] {
       if let rawAddress = device.addressString,
-        let address = BluetoothOutputNaming.address(in: rawAddress), let name = device.name {
+        let address = BluetoothOutputNaming.address(in: rawAddress), let name = device.name
+      {
         pairedNames[address] = name
       }
     }
@@ -111,7 +219,8 @@ final class AudioOutputs: ObservableObject {
     }.map { id in
       let audioName = string(id, kAudioObjectPropertyName) ?? "Audio output"
       let uid = string(id, kAudioDevicePropertyDeviceUID) ?? ""
-      let name = BluetoothOutputNaming.name(audioName: audioName, uid: uid, pairedNames: pairedNames)
+      let name = BluetoothOutputNaming.name(
+        audioName: audioName, uid: uid, pairedNames: pairedNames)
       let model = string(id, kAudioDevicePropertyModelUID) ?? ""
       let transport = integer(id, kAudioDevicePropertyTransportType) ?? 0
       return AudioOutputDevice(
@@ -119,19 +228,11 @@ final class AudioOutputs: ObservableObject {
         symbol: Self.symbol(name: name, model: model, transport: transport),
         nativeIcon: icon(id), bluetoothAddress: BluetoothOutputNaming.address(in: uid))
     }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-    if started {
-      observe(system, kAudioHardwarePropertyDevices)
-      observe(system, kAudioHardwarePropertyDefaultOutputDevice)
-      for id in ids {
-        observe(id, kAudioObjectPropertyName)
-        observe(id, kAudioDevicePropertyDeviceIsAlive)
-        observe(id, kAudioDevicePropertyDataSource, scope: kAudioDevicePropertyScopeOutput)
-        observe(id, kAudioDevicePropertyStreamConfiguration, scope: kAudioDevicePropertyScopeOutput)
-      }
-    }
   }
 
   func select(_ device: AudioOutputDevice) {
+    let timing = TransitionTiming("output selection")
+    defer { timing.end() }
     var address = property(kAudioHardwarePropertyDefaultOutputDevice)
     var settable: DarwinBoolean = false
     guard AudioObjectIsPropertySettable(system, &address, &settable) == noErr,
@@ -149,7 +250,6 @@ final class AudioOutputs: ObservableObject {
       return
     }
     error = nil
-    reload()
   }
 
   static func symbol(name: String, model: String, transport: UInt32) -> String {
@@ -240,20 +340,35 @@ final class AudioOutputs: ObservableObject {
     var address = property(selector, scope: scope)
     guard AudioObjectHasProperty(object, &address) else { return }
     let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-      MainActor.assumeIsolated {
-        guard let self, self.started else { return }
-        self.reload()
-      }
+      guard let self, self.started else { return }
+      self.onChange?()
     }
-    if AudioObjectAddPropertyListenerBlock(object, &address, .main, block) == noErr {
+    if AudioObjectAddPropertyListenerBlock(object, &address, queue, block) == noErr {
       listeners.append((object, address, block))
+    }
+  }
+
+  private func updateObservedDevices(_ ids: [AudioObjectID]) {
+    guard started else { return }
+    let wanted = Set(ids)
+    let existing = Set(listeners.map { $0.0 }).subtracting([system])
+    for (object, original, block) in listeners where object != system && !wanted.contains(object) {
+      var address = original
+      AudioObjectRemovePropertyListenerBlock(object, &address, queue, block)
+    }
+    listeners.removeAll { $0.0 != system && !wanted.contains($0.0) }
+    for id in wanted.subtracting(existing) {
+      observe(id, kAudioObjectPropertyName)
+      observe(id, kAudioDevicePropertyDeviceIsAlive)
+      observe(id, kAudioDevicePropertyDataSource, scope: kAudioDevicePropertyScopeOutput)
+      observe(id, kAudioDevicePropertyStreamConfiguration, scope: kAudioDevicePropertyScopeOutput)
     }
   }
 
   private func removeListeners() {
     for (object, original, block) in listeners {
       var address = original
-      AudioObjectRemovePropertyListenerBlock(object, &address, .main, block)
+      AudioObjectRemovePropertyListenerBlock(object, &address, queue, block)
     }
     listeners.removeAll()
   }

@@ -71,8 +71,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     if settings.openSettingsOnLaunch { settingsWindow?.open() }
   }
 
-  func applicationWillTerminate(_ notification: Notification) {
+  private var terminating = false
+  func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    guard !terminating else { return .terminateLater }
+    terminating = true
     island?.stop()
+    Task { @MainActor in
+      await self.island?.session.audio.finishStopping()
+      await self.island?.session.outputs.finishStopping()
+      await PlaybackScriptWorker.shared.finishStopping()
+      sender.reply(toApplicationShouldTerminate: true)
+    }
+    return .terminateLater
+  }
+
+  func applicationWillTerminate(_ notification: Notification) {
+    if !terminating { island?.stop() }
     for observer in observers { observer.center.removeObserver(observer.token) }
     observers.removeAll()
     if let statusItem { NSStatusBar.system.removeStatusItem(statusItem) }

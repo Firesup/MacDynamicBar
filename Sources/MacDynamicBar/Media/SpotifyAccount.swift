@@ -1,8 +1,8 @@
 import AppKit
 import Combine
 import CryptoKit
-import Network
 import LocalAuthentication
+import Network
 import Security
 
 // MARK: - Spotify Account Authorization (PKCE)
@@ -162,6 +162,9 @@ final class SpotifyAccount: ObservableObject {
   private var connectTask: Task<Void, Never>?
   private var refreshTask: Task<Tokens, Error>?
   private var generation = 0
+  private var playbackTask: Task<SpotifyPlaybackDetails, Error>?
+  private var playbackCache: (date: Date, details: SpotifyPlaybackDetails)?
+  private var retryAfter = Date.distantPast
   private let service = "com.minnow.spotify.oauth"
   private let requiredScopes =
     "user-library-read user-library-modify user-read-playback-state user-modify-playback-state"
@@ -188,7 +191,9 @@ final class SpotifyAccount: ObservableObject {
       let result = await Task.detached {
         Self.readStoredTokens(service: service, allowInteraction: false)
       }.value
-      guard let self, self.generation == version, !self.isConnecting, self.tokens == nil else { return }
+      guard let self, self.generation == version, !self.isConnecting, self.tokens == nil else {
+        return
+      }
       _ = self.applyStoredTokens(result)
     }
   }
@@ -230,7 +235,10 @@ final class SpotifyAccount: ObservableObject {
   func showConnectionPrompt() {
     guard !isConnecting else { return }
     if !isConnected,
-      applyStoredTokens(Self.readStoredTokens(service: service, allowInteraction: true)) { return }
+      applyStoredTokens(Self.readStoredTokens(service: service, allowInteraction: true))
+    {
+      return
+    }
     let alert = NSAlert()
     alert.messageText = "Connect Spotify"
     alert.informativeText =
@@ -301,6 +309,9 @@ final class SpotifyAccount: ObservableObject {
 
   func disconnect() {
     generation += 1
+    playbackTask?.cancel()
+    playbackTask = nil
+    playbackCache = nil
     callback.cancel()
     connectTask?.cancel()
     connectTask = nil
@@ -335,12 +346,28 @@ final class SpotifyAccount: ObservableObject {
   }
 
   func playbackDetails() async throws -> SpotifyPlaybackDetails {
-    let data = try await request(path: "me/player", method: "GET")
-    if data.isEmpty { return SpotifyPlaybackDetails(repeatMode: nil, item: nil) }
-    return try JSONDecoder().decode(SpotifyPlaybackDetails.self, from: data)
+    if let cache = playbackCache, Date.now.timeIntervalSince(cache.date) < 3 {
+      return cache.details
+    }
+    if let playbackTask { return try await playbackTask.value }
+    let version = generation
+    let task = Task { @MainActor in
+      let timing = TransitionTiming("Spotify playback refresh")
+      defer { timing.end() }
+      let data = try await self.request(path: "me/player", method: "GET")
+      if data.isEmpty { return SpotifyPlaybackDetails(repeatMode: nil, item: nil) }
+      return try JSONDecoder().decode(SpotifyPlaybackDetails.self, from: data)
+    }
+    playbackTask = task
+    defer { if version == generation { playbackTask = nil } }
+    let details = try await task.value
+    guard version == generation else { throw CancellationError() }
+    playbackCache = (.now, details)
+    return details
   }
 
   func setRepeatOne(_ enabled: Bool) async throws {
+    defer { playbackCache = nil }
     _ = try await request(
       path: "me/player/repeat", method: "PUT",
       items: [URLQueryItem(name: "state", value: enabled ? "track" : "off")])
@@ -349,10 +376,16 @@ final class SpotifyAccount: ObservableObject {
   private func request(path: String, method: String, items: [URLQueryItem] = []) async throws
     -> Data
   {
+    guard Date.now >= retryAfter else {
+      throw SpotifyAccountError.message("Spotify is limiting requests. Try again shortly.")
+    }
     let version = generation
     for attempt in 0..<2 {
       let token = try await accessToken(forceRefresh: attempt > 0)
       guard version == generation else { throw CancellationError() }
+      guard Date.now >= retryAfter else {
+        throw SpotifyAccountError.message("Spotify is limiting requests. Try again shortly.")
+      }
       var url = URLComponents(string: "https://api.spotify.com/v1/" + path)!
       if !items.isEmpty { url.queryItems = items }
       var request = URLRequest(url: url.url!)
@@ -366,6 +399,8 @@ final class SpotifyAccount: ObservableObject {
       let code = http?.statusCode ?? 0
       if code == 401 && attempt == 0 { continue }
       if code == 429 {
+        let delay = Double(http?.value(forHTTPHeaderField: "Retry-After") ?? "") ?? 30
+        retryAfter = .now.addingTimeInterval(max(1, delay))
         throw SpotifyAccountError.message("Spotify is limiting requests. Try again shortly.")
       }
       guard (200..<300).contains(code) else {

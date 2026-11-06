@@ -398,6 +398,7 @@ struct MinnowSettingsView: View {
         Toggle("Live Waveform", isOn: $settings.audioReactive)
         Button("Retry Audio Capture") { coordinator.retryCapture() }
         AudioCaptureStatusView(audio: coordinator.session.audio)
+        PlayerAccessoryDiagnostics(accessories: coordinator.session.accessories)
       }
       SettingsGroup("Behaviour") {
         Toggle("Collapse on Pause", isOn: $settings.collapseOnPause)

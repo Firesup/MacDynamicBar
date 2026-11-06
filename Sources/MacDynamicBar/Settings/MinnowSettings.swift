@@ -96,7 +96,9 @@ final class MinnowSettings: ObservableObject {
   @Published var lockCalendar: Bool { didSet { save("lockCalendar", lockCalendar) } }
   @Published var lockReminders: Bool { didSet { save("lockReminders", lockReminders) } }
   @Published var calendarEnabled: Bool { didSet { save("todayCalendarEnabled", calendarEnabled) } }
-  @Published var remindersEnabled: Bool { didSet { save("todayRemindersEnabled", remindersEnabled) } }
+  @Published var remindersEnabled: Bool {
+    didSet { save("todayRemindersEnabled", remindersEnabled) }
+  }
   @Published var selectedCalendars: TodaySelection {
     didSet { save("todayCalendarSelection", try! JSONEncoder().encode(selectedCalendars)) }
   }
@@ -128,9 +130,11 @@ final class MinnowSettings: ObservableObject {
     shelfEnabled = bool("minnowShelfEnabled", false)
     calendarEnabled = bool("todayCalendarEnabled", bool("lockCalendar", false))
     remindersEnabled = bool("todayRemindersEnabled", bool("lockReminders", false))
-    selectedCalendars = defaults.data(forKey: "todayCalendarSelection")
+    selectedCalendars =
+      defaults.data(forKey: "todayCalendarSelection")
       .flatMap { try? JSONDecoder().decode(TodaySelection.self, from: $0) } ?? .all
-    selectedReminderLists = defaults.data(forKey: "todayReminderSelection")
+    selectedReminderLists =
+      defaults.data(forKey: "todayReminderSelection")
       .flatMap { try? JSONDecoder().decode(TodaySelection.self, from: $0) } ?? .all
     brightnessHUD = bool("brightnessHUD", false)
     chargingPopups = bool("minnowChargingPopups", true)
@@ -169,7 +173,7 @@ final class MinnowSettings: ObservableObject {
     artwork = bool("showAlbumArtwork", true)
     leftAction =
       PlayerAction(rawValue: defaults.string(forKey: "islandPlayerAction") ?? "") ?? .like
-    audioReactive = bool("audioReactiveWavesEnabled", true)
+    audioReactive = bool("audioReactiveWavesEnabled", WaveformDefaults.enabled)
     collapseOnPause = bool("collapseIslandOnPause", false)
     collapseDelay = number("islandCollapseDelay", 3, 0...30)
     hideOnPause = bool("hideIslandOnPause", false)
@@ -185,8 +189,18 @@ final class MinnowSettings: ObservableObject {
       value.expandedWidth = expandedWidth
       value.expandedContentHeight = expandedHeight
     }
-    if todayEnabled || shelfEnabled { value.expandedContentHeight = max(232, value.expandedContentHeight + 28) }
+
     return value
+  }
+
+  func contentHeight(for page: IslandPage) -> CGFloat {
+    let music = configuration.expandedContentHeight
+    let tabs: CGFloat = todayEnabled || shelfEnabled ? 28 : 0
+    switch page {
+    case .music: return music + tabs
+    case .today: return min(360, max(232, music + tabs))
+    case .shelf: return max(232, music + tabs)
+    }
   }
 
   func resetPreferences() {
@@ -226,7 +240,7 @@ final class MinnowSettings: ObservableObject {
     haptics = false
     artwork = true
     leftAction = .like
-    audioReactive = true
+    audioReactive = WaveformDefaults.enabled
     collapseOnPause = false
     collapseDelay = 3
     hideOnPause = false

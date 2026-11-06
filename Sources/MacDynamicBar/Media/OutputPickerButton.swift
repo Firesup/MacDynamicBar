@@ -38,6 +38,7 @@ struct OutputPickerButton: NSViewRepresentable {
     context.coordinator.synchronize()
   }
   static func dismantleNSView(_ nsView: NSButton, coordinator: Coordinator) {
+    coordinator.close()
     coordinator.popover.delegate = nil
     coordinator.popover.performClose(nil)
   }

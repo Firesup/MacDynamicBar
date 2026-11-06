@@ -74,6 +74,10 @@ final class IslandWindowController {
       self.resize(presentation: self.state.presentation)
       self.updatePointer()
     }.store(in: &subscriptions)
+    state.$page.removeDuplicates().receive(on: RunLoop.main).sink { [weak self] _ in
+      guard let self else { return }
+      self.resize(presentation: self.state.presentation)
+    }.store(in: &subscriptions)
     state.objectWillChange.receive(on: RunLoop.main).sink { [weak self] in
       self?.onInteractionChanged?()
     }.store(in: &subscriptions)
@@ -120,7 +124,11 @@ final class IslandWindowController {
       blur: settings.backgroundBlur, opacity: settings.opacity,
       headerHeight: layout?.headerHeight ?? 28, shape: settings.islandShape,
       gradientVisibility: settings.gradientVisibility)
-    if isShown && (changed || reposition) { show() }
+    if isShown && (changed || reposition) {
+      show()
+    } else {
+      resize(presentation: state.presentation)
+    }
     updateActivityCapsule()
   }
 
@@ -177,7 +185,11 @@ final class IslandWindowController {
       headerHeight: layout.headerHeight, shape: settings.islandShape,
       gradientVisibility: settings.gradientVisibility)
     // The transparent canvas stays fixed throughout all interactions.
-    let expanded = layout.size(for: .expanded)
+    var largest = layout
+    largest.configuration.expandedContentHeight = max(
+      settings.contentHeight(for: .music), settings.contentHeight(for: .today),
+      settings.contentHeight(for: .shelf))
+    let expanded = largest.size(for: .expanded)
     let hover = layout.size(for: .hover)
     let canvasSize = CGSize(
       width: max(expanded.width, hover.width),
@@ -242,7 +254,14 @@ final class IslandWindowController {
   }
 
   private func surfaceSize(layout: IslandLayout, presentation: IslandPresentation) -> CGSize {
-    guard popups.active != nil else { return layout.size(for: presentation) }
+    guard popups.active != nil else {
+      var pageLayout = layout
+      pageLayout.configuration.expandedContentHeight = settings.contentHeight(
+        for: state.effectivePage(
+          mediaEnabled: settings.mediaEnabled, todayEnabled: settings.todayEnabled,
+          shelfEnabled: settings.shelfEnabled))
+      return pageLayout.size(for: presentation)
+    }
     var size = layout.size(for: .expanded)
     size.height = min(size.height, layout.headerHeight + 88)
     return size

@@ -428,7 +428,9 @@ private func torontoCalendar() -> Calendar {
   let layout = IslandLayout(
     screenFrame: CGRect(x: 0, y: 0, width: 1440, height: 900),
     notchWidth: 160, notchHeight: 28, showsMiniPlayer: true, configuration: settings.configuration)
-  let size = layout.size(for: .expanded)
+  var pageLayout = layout
+  pageLayout.configuration.expandedContentHeight = settings.contentHeight(for: .today)
+  let size = pageLayout.size(for: .expanded)
   let root = IslandView(
     state: state, player: session.player, audio: session.audio,
     accessories: session.accessories, outputs: session.outputs,

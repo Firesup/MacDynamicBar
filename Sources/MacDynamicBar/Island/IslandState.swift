@@ -155,6 +155,7 @@ final class IslandState: ObservableObject {
   }
 
   func collapse() {
+    completingReminder = false
     beforeShelfDrop = nil
     draggingShelf = false
     isOutputPickerOpen = false

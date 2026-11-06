@@ -8,7 +8,7 @@ import UniformTypeIdentifiers
 struct IslandView: View {
   @ObservedObject var state: IslandState
   @ObservedObject var player: MediaPlayer
-  @ObservedObject var audio: MusicAudioLevels
+  let audio: MusicAudioLevels
   @ObservedObject var accessories: PlayerAccessories
   @ObservedObject var outputs: AudioOutputs
   @ObservedObject var popups: PopupCoordinator
@@ -78,7 +78,10 @@ struct IslandView: View {
           }
           .frame(
             width: layout.size(for: .expanded).width,
-            height: layout.configuration.expandedContentHeight
+            height: settings.contentHeight(
+              for: state.effectivePage(
+                mediaEnabled: settings.mediaEnabled, todayEnabled: settings.todayEnabled,
+                shelfEnabled: settings.shelfEnabled))
           )
           .opacity(state.isExpanded ? 1 : 0)
           .allowsHitTesting(state.isExpanded)
@@ -90,7 +93,7 @@ struct IslandView: View {
       .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: popups.active?.id)
     }
     .environment(\.islandTextContrast, textContrast)
-    .preferredColorScheme(.dark)
+    .environment(\.colorScheme, .dark)
     .onDrop(of: [UTType.fileURL.identifier], isTargeted: $shelfDropTargeted) { providers in
       guard settings.shelfEnabled, popups.active == nil else { return false }
       state.finishShelfDrop(accepted: true)

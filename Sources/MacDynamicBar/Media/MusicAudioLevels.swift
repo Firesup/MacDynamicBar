@@ -121,6 +121,11 @@ final class MusicAudioLevels: ObservableObject {
   @Published private(set) var hasAudioSignal = false
   @Published private(set) var status: String
   @Published private(set) var failureDetail: String?
+  @Published private(set) var spotifyLocation: SpotifyPlaybackLocation = .unknown
+  var remotePlaybackName: String? {
+    if case .remote(let name) = spotifyLocation { return name }
+    return nil
+  }
   private var captureFailed = false
 
   static func failureStatus(domain: String, code: Int) -> String {
@@ -131,16 +136,20 @@ final class MusicAudioLevels: ObservableObject {
   }
   private let defaults: UserDefaults
 
-  init(defaults: UserDefaults = .standard) {
+  typealias CaptureFactory = (@escaping @Sendable ([Float]) -> Void) -> any ProcessCapturing
+  private let makeCapture: CaptureFactory?
+  init(defaults: UserDefaults = .standard, makeCapture: CaptureFactory? = nil) {
+    self.makeCapture = makeCapture
     self.defaults = defaults
     // First launch should request capture when Music plays. Respect an
     // explicit saved choice to turn the feature off.
-    let enabled = defaults.object(forKey: "audioReactiveWavesEnabled") as? Bool ?? true
+    let enabled =
+      defaults.object(forKey: "audioReactiveWavesEnabled") as? Bool ?? WaveformDefaults.enabled
     isEnabled = enabled
     status = enabled ? "Waiting for audio" : "Audio-reactive waves off"
   }
 
-  private var processCapture: AnyObject?
+  private var processCapture: (any ProcessCapturing)?
   @Published private(set) var backend = "Not capturing"
   private var stream: SCStream?
   private var output: MusicAudioOutput?
@@ -157,6 +166,7 @@ final class MusicAudioLevels: ObservableObject {
   private var firstSampleTask: Task<Void, Never>?
 
   func setEnabled(_ enabled: Bool) {
+    guard isEnabled != enabled else { return }
     isEnabled = enabled
     defaults.set(enabled, forKey: "audioReactiveWavesEnabled")
     status = enabled ? "Waiting for playback" : "Audio-reactive waves off"
@@ -170,10 +180,25 @@ final class MusicAudioLevels: ObservableObject {
     requestUpdate()
   }
 
+  func setSpotifyLocation(_ location: SpotifyPlaybackLocation) {
+    guard spotifyLocation != location else { return }
+    let previousRemoteName = remotePlaybackName
+    spotifyLocation = location
+    if remotePlaybackName != previousRemoteName { requestUpdate() }
+  }
+
   func setSuspended(_ value: Bool) {
     guard suspended != value else { return }
     suspended = value
     requestUpdate()
+  }
+
+  private var outputID: UInt32?
+  func outputChanged(_ id: UInt32) {
+    guard outputID != id else { return }
+    let hadOutput = outputID != nil
+    outputID = id
+    if hadOutput && shouldCapture { requestUpdate() }
   }
 
   func retry() {
@@ -187,6 +212,10 @@ final class MusicAudioLevels: ObservableObject {
     retry()
   }
 
+  func finishStopping() async {
+    await reconcileTask?.value
+  }
+
   func stop() {
     isEnabled = false  // Does not change the saved user preference.
     wantsPlayback = false
@@ -195,6 +224,7 @@ final class MusicAudioLevels: ObservableObject {
 
   private var shouldCapture: Bool {
     isEnabled && wantsPlayback && captureSource != nil && !suspended
+      && !(captureSource == .spotify && remotePlaybackName != nil)
   }
 
   private func requestUpdate() {
@@ -218,7 +248,9 @@ final class MusicAudioLevels: ObservableObject {
   }
 
   private func reconcile(version: Int) async {
-    if #available(macOS 14.2, *), let oldCapture = processCapture as? ProcessAudioCapture {
+    let timing = TransitionTiming("capture reconciliation")
+    defer { timing.end() }
+    if let oldCapture = processCapture {
       processCapture = nil
       await oldCapture.stop()
     }
@@ -241,14 +273,17 @@ final class MusicAudioLevels: ObservableObject {
       if #available(macOS 14.2, *) {
         guard let source = captureSource else { return }
         backend = "Core Audio process tap"
-        let candidate = ProcessAudioCapture { [weak self] values in
+        let onLevels: @Sendable ([Float]) -> Void = { [weak self] values in
           Task { @MainActor [weak self] in
             guard let self, self.generation == version, self.shouldCapture else { return }
             self.receive(values)
           }
         }
-        let pid = NSRunningApplication.runningApplications(withBundleIdentifier: source.bundleIdentifier)
-          .first?.processIdentifier
+        let candidate = makeCapture?(onLevels) ?? ProcessAudioCapture(onLevels: onLevels)
+        let pid = NSRunningApplication.runningApplications(
+          withBundleIdentifier: source.bundleIdentifier
+        )
+        .first?.processIdentifier
         try await candidate.start(source: source, pid: pid)
         guard version == generation, shouldCapture else {
           await candidate.stop()
@@ -388,7 +423,6 @@ struct PlaybackIndicator: View {
   }
 }
 
-
 struct AudioCaptureStatusView: View {
   @ObservedObject var audio: MusicAudioLevels
   var body: some View {
@@ -396,10 +430,14 @@ struct AudioCaptureStatusView: View {
       Text(audio.backend + " · " + audio.status).font(.caption).foregroundStyle(.secondary)
       if let detail = audio.failureDetail {
         Text(detail).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-        Text("If Minnow is already enabled in Screen & System Audio Recording, the permission may belong to an earlier development build. Remove that Minnow entry, add this workspace's .build/Minnow.app again, then quit and reopen Minnow. Rebuilding an ad-hoc signed app can invalidate its capture permission. On macOS 14.2 and later, Minnow uses System Audio Recording access for a per-player Core Audio tap.")
-          .font(.caption).foregroundStyle(.secondary)
+        Text(
+          "If Minnow is already enabled in Screen & System Audio Recording, the permission may belong to an earlier development build. Remove that Minnow entry, add this workspace's .build/Minnow.app again, then quit and reopen Minnow. Rebuilding an ad-hoc signed app can invalidate its capture permission. On macOS 14.2 and later, Minnow uses System Audio Recording access for a per-player Core Audio tap."
+        )
+        .font(.caption).foregroundStyle(.secondary)
         Button("Open Capture Settings…") {
-          if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+          if let url = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+          {
             NSWorkspace.shared.open(url)
           }
         }
