@@ -43,7 +43,6 @@ struct AudioOutputDevice: Identifiable, @unchecked Sendable {
   let id: AudioDeviceID
   let name: String
   let symbol: String
-  let nativeIcon: NSImage?
   var bluetoothAddress: String? = nil
 }
 
@@ -60,6 +59,10 @@ final class AudioOutputs: ObservableObject {
   private var notificationTask: Task<Void, Never>?
   private var started = false
   var current: AudioOutputDevice? { devices.first { $0.id == selectedID } }
+  init(devices: [AudioOutputDevice] = [], selectedID: AudioDeviceID = 0) {
+    self.devices = devices
+    self.selectedID = selectedID
+  }
   func start() {
     guard !started else { return }
     started = true
@@ -138,8 +141,11 @@ final class AudioOutputs: ObservableObject {
       }
     }
   }
-  static func symbol(name: String, model: String, transport: UInt32) -> String {
-    AudioOutputWorker.symbol(name: name, model: model, transport: transport)
+  static func symbol(
+    name: String, model: String, transport: UInt32, pairedIdentity: AirPodsIdentity? = nil
+  ) -> String {
+    AudioOutputWorker.symbol(
+      name: name, model: model, transport: transport, pairedIdentity: pairedIdentity)
   }
 }
 private struct OutputSnapshot: @unchecked Sendable {
@@ -203,11 +209,13 @@ private final class AudioOutputWorker: @unchecked Sendable {
     }
     updateObservedDevices(ids)
     var pairedNames: [String: String] = [:]
+    var pairedIdentities: [String: AirPodsIdentity] = [:]
     for device in IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] ?? [] {
       if let rawAddress = device.addressString,
         let address = BluetoothOutputNaming.address(in: rawAddress), let name = device.name
       {
         pairedNames[address] = name
+        pairedIdentities[address] = AirPodsIdentity.resolve(device: device)
       }
     }
     devices = ids.filter { id in
@@ -225,8 +233,10 @@ private final class AudioOutputWorker: @unchecked Sendable {
       let transport = integer(id, kAudioDevicePropertyTransportType) ?? 0
       return AudioOutputDevice(
         id: id, name: name,
-        symbol: Self.symbol(name: name, model: model, transport: transport),
-        nativeIcon: icon(id), bluetoothAddress: BluetoothOutputNaming.address(in: uid))
+        symbol: Self.symbol(
+          name: name, model: model, transport: transport,
+          pairedIdentity: BluetoothOutputNaming.address(in: uid).flatMap { pairedIdentities[$0] }),
+        bluetoothAddress: BluetoothOutputNaming.address(in: uid))
     }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
   }
 
@@ -252,24 +262,13 @@ private final class AudioOutputWorker: @unchecked Sendable {
     error = nil
   }
 
-  static func symbol(name: String, model: String, transport: UInt32) -> String {
-    let identity = (model + " " + name).lowercased().replacingOccurrences(of: " ", with: "")
-    if identity.contains("airpodsmax") { return "airpodsmax" }
-    if identity.contains("airpodspro") { return "airpodspro" }
-    if identity.contains("airpods") { return "airpods" }
-    if identity.contains("headphone") || identity.contains("headset") { return "headphones" }
-    if transport == kAudioDeviceTransportTypeBluetooth
-      || transport == kAudioDeviceTransportTypeBluetoothLE
-    {
-      return "wave.3.right"  // Unknown Bluetooth model: use a neutral audio-route icon.
-    }
-    if transport == kAudioDeviceTransportTypeAirPlay { return "airplay.audio" }
-    if transport == kAudioDeviceTransportTypeHDMI
-      || transport == kAudioDeviceTransportTypeDisplayPort
-    {
-      return "display"
-    }
-    return "speaker.wave.2"
+  static func symbol(
+    name: String, model: String, transport: UInt32, pairedIdentity: AirPodsIdentity? = nil
+  ) -> String {
+    if transport == kAudioDeviceTransportTypeBuiltIn { return "laptopcomputer" }
+    return pairedIdentity?.symbol
+      ?? AirPodsIdentity.resolve(name: model + " " + name)?.symbol
+      ?? "speaker.wave.2"
   }
 
   private func property(
@@ -304,16 +303,6 @@ private final class AudioOutputWorker: @unchecked Sendable {
       return nil
     }
     return value?.takeRetainedValue() as String?
-  }
-
-  private func icon(_ id: AudioObjectID) -> NSImage? {
-    var address = property(kAudioDevicePropertyIcon)
-    var value: Unmanaged<CFURL>?
-    var size = UInt32(MemoryLayout<Unmanaged<CFURL>?>.size)
-    guard AudioObjectGetPropertyData(id, &address, 0, nil, &size, &value) == noErr,
-      let url = value?.takeRetainedValue()
-    else { return nil }
-    return NSImage(contentsOf: url as URL)
   }
 
   private func outputChannels(_ id: AudioDeviceID) -> Int {
@@ -374,19 +363,39 @@ private final class AudioOutputWorker: @unchecked Sendable {
   }
 }
 
+/// Both AppKit and SwiftUI use this configured glyph; device artwork never overrides it.
+enum AudioOutputGlyph {
+  static func symbolName(for symbol: String?, available: (String) -> Bool) -> String {
+    let preferred = symbol ?? "speaker.wave.2"
+    var candidates = [preferred]
+    if preferred.hasPrefix("airpods") { candidates.append("airpods") }
+    candidates.append("speaker.wave.2")
+    return candidates.first(where: available) ?? "speaker.wave.2"
+  }
+
+  static func image(for device: AudioOutputDevice?) -> NSImage {
+    let symbol = symbolName(for: device?.symbol) {
+      NSImage(systemSymbolName: $0, accessibilityDescription: nil) != nil
+    }
+    // The final fallback is available on every supported macOS version (14+).
+    let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)!
+    let configured = image.withSymbolConfiguration(
+      NSImage.SymbolConfiguration(pointSize: 18, weight: .semibold)) ?? image
+    configured.isTemplate = true
+    let size = configured.size
+    let scale = 20 / max(size.width, size.height)
+    configured.size = NSSize(width: size.width * scale, height: size.height * scale)
+    return configured
+  }
+}
+
 struct AudioOutputIcon: View {
   let device: AudioOutputDevice?
   var body: some View {
-    Group {
-      if let device, let icon = device.nativeIcon,
-        !device.symbol.hasPrefix("airpods")
-      {
-        Image(nsImage: icon).renderingMode(.template).resizable().scaledToFit()
-      } else {
-        Image(systemName: device?.symbol ?? "speaker.wave.2")
-          .resizable().scaledToFit()
-      }
-    }.foregroundStyle(.white).frame(width: 20, height: 20)
+    Image(nsImage: AudioOutputGlyph.image(for: device))
+      .renderingMode(.template).resizable().scaledToFit()
+      .foregroundStyle(.white).frame(width: 20, height: 20)
+      .accessibilityHidden(true)
   }
 }
 

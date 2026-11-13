@@ -24,19 +24,16 @@ struct OutputPickerButton: NSViewRepresentable {
   func updateNSView(_ button: NSButton, context: Context) {
     context.coordinator.parent = self
     let device = outputs.current
-    let image: NSImage?
-    if let device, let native = device.nativeIcon, !device.symbol.hasPrefix("airpods") {
-      image = native.copy() as? NSImage
-    } else {
-      image = NSImage(
-        systemSymbolName: device?.symbol ?? "speaker.wave.2", accessibilityDescription: nil)
-    }
-    image?.isTemplate = true
-    image?.size = NSSize(width: 20, height: 20)
-    button.image = image
-    button.toolTip = device?.name ?? "Choose sound output"
+    Self.update(button, device: device)
     context.coordinator.synchronize()
   }
+  static func update(_ button: NSButton, device: AudioOutputDevice?) {
+    button.image = AudioOutputGlyph.image(for: device)
+    button.toolTip = device?.name ?? "Choose sound output"
+    button.setAccessibilityLabel("Choose sound output")
+    button.setAccessibilityValue(device?.name ?? "No selected output")
+  }
+
   static func dismantleNSView(_ nsView: NSButton, coordinator: Coordinator) {
     coordinator.close()
     coordinator.popover.delegate = nil
