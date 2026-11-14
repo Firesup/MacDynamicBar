@@ -87,6 +87,7 @@ final class MinnowSettings: ObservableObject {
 
   @Published var popupDuration: Double { didSet { save("minnowPopupDuration", popupDuration) } }
   @Published var showActivities: Bool { didSet { save("minnowShowActivities", showActivities) } }
+  @Published var lockScreenGlass: Bool { didSet { save("minnowLockScreenGlass", lockScreenGlass) } }
   @Published var lockScreenPlayer: Bool {
     didSet { save("minnowLockScreenPlayer", lockScreenPlayer) }
   }
@@ -122,6 +123,7 @@ final class MinnowSettings: ObservableObject {
     popupDuration = number("minnowPopupDuration", 2, 1...10)
     showActivities = bool("minnowShowActivities", true)
     lockScreenPlayer = bool("minnowLockScreenPlayer", false)
+    lockScreenGlass = bool("minnowLockScreenGlass", false)
     onlineLyrics = bool("minnowOnlineLyrics", false)
     lockBattery = bool("lockBattery", true)
     lockWeather = bool("lockWeather", false)
@@ -215,6 +217,7 @@ final class MinnowSettings: ObservableObject {
     lockCalendar = false
     lockReminders = false
     lockScreenPlayer = false
+    lockScreenGlass = false
     onlineLyrics = false
     popupDuration = 2
     showActivities = true

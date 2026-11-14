@@ -120,6 +120,7 @@ final class AppleMusicPlayer: ObservableObject {
     isMusicRunning && track != nil && lastError == nil
   }
 
+  private var playbackNoticeVersion = 0
   private var sessionLocked = false
   func setSessionLocked(_ locked: Bool) {
     if locked != sessionLocked { lifecycle += 1 }
@@ -132,6 +133,7 @@ final class AppleMusicPlayer: ObservableObject {
       return
     }
     guard let notice else { return }
+    playbackNoticeVersion += 1
     isMusicRunning = true
     let position = playbackPosition(at: .now)
     if let incoming = notice.track {
@@ -324,7 +326,20 @@ final class AppleMusicPlayer: ObservableObject {
   }
 
   func togglePlayback() {
-    send(.togglePlayback)
+    guard sessionLocked else { send(.togglePlayback); return }
+    guard canControlPlayback else { return }
+    let version = lifecycle
+    let noticeVersion = playbackNoticeVersion
+    let before = isPlaying
+    Task { @MainActor in
+      guard let observed = await LockedPlaybackTransport.toggle(.appleMusic, before: before),
+        version == lifecycle, sessionLocked,
+        noticeVersion == playbackNoticeVersion else { return }
+      isPlaying = observed.playing
+      if let position = observed.position { positionAtUpdate = position }
+      positionUpdatedAt = .now
+      onChange?()
+    }
   }
 
   func next() {

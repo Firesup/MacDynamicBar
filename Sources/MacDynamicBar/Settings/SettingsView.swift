@@ -265,6 +265,8 @@ struct MinnowSettingsView: View {
         "Experimental player over the real macOS lockscreen. Native date/time and authentication remain handled by macOS. Enable, then lock your Mac to test."
     ) {
       Toggle("Lock Screen Player (Experimental)", isOn: $settings.lockScreenPlayer)
+      Toggle("Glass Lock Screen Card", isOn: $settings.lockScreenGlass)
+      note("Turn glass off for the frosted fallback. The compact card appears on the built-in display above authentication; artwork expansion and lyrics are follow-on designs.")
       LockScreenStatusView(controller: coordinator.lockScreen)
       Toggle("Online Lyrics · LRCLIB", isOn: $settings.onlineLyrics)
       note(

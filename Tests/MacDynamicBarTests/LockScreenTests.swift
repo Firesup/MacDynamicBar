@@ -1,25 +1,22 @@
+import AppKit
 import Foundation
+import SwiftUI
 import Testing
 
 @testable import MacDynamicBar
 
-@Test func lockScreenPassThroughKeepsPasswordAndBackgroundOutsidePlayer() {
-  let size = CGSize(width: 860, height: 620)
-  #expect(
-    !LockScreenGeometry.accepts(CGPoint(x: 20, y: 50), size: size, expanded: false, lyrics: false))
-  #expect(
-    LockScreenGeometry.accepts(CGPoint(x: 430, y: 80), size: size, expanded: false, lyrics: false))
-  #expect(
-    !LockScreenGeometry.accepts(CGPoint(x: 430, y: 350), size: size, expanded: false, lyrics: false)
-  )
-  #expect(
-    LockScreenGeometry.accepts(CGPoint(x: 430, y: 350), size: size, expanded: true, lyrics: false))
-  #expect(
-    !LockScreenGeometry.accepts(CGPoint(x: 820, y: 580), size: size, expanded: true, lyrics: false))
-  let screen = CGRect(x: -1440, y: 200, width: 1440, height: 900)
-  let frame = LockScreenGeometry.playerFrame(screen: screen)
-  #expect(screen.contains(frame))
-  #expect(frame.minY >= screen.minY + 170)
+@Test @MainActor func lockScreenPassThroughKeepsPasswordAndBackgroundOutsidePlayer() {
+  let size = CGSize(width: 380, height: 164)
+  #expect(LockScreenGeometry.accepts(CGPoint(x: 190, y: 80), size: size))
+  #expect(!LockScreenGeometry.accepts(CGPoint(x: -1, y: 80), size: size))
+  #expect(!LockScreenGeometry.accepts(CGPoint(x: 190, y: -1), size: size))
+  #expect(!LockScreenGeometry.accepts(CGPoint(x: 400, y: 80), size: size))
+  let panel = LockMediaPanel(contentRect: CGRect(origin: .zero, size: size),
+    styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+  panel.isReleasedWhenClosed = false
+  defer { panel.close() }
+  #expect(!panel.canBecomeKey && !panel.canBecomeMain)
+  #expect(panel.styleMask.contains(.nonactivatingPanel))
 }
 
 @Test func lyricsRequestsEncodeMetadataAndRejectWrongRecord() throws {
@@ -58,26 +55,20 @@ import Testing
     CGRect(x: 0, y: 0, width: 800, height: 600),
     CGRect(x: -1280, y: -800, width: 1280, height: 800),
     CGRect(x: 0, y: 0, width: 360, height: 480),
+    CGRect(x: 0, y: 0, width: 1470, height: 956),
   ] {
     let frame = LockScreenGeometry.playerFrame(screen: screen)
     #expect(screen.contains(frame))
-    let bounds = CGRect(origin: .zero, size: frame.size)
-    #expect(bounds.contains(LockScreenGeometry.cardFrame(size: frame.size)))
-    for lyrics in [true, false] {
-      let artwork = LockScreenGeometry.artworkFrame(size: frame.size, lyrics: lyrics)
-      #expect(bounds.contains(artwork))
-      #expect(LockScreenGeometry.accepts(CGPoint(x: artwork.midX, y: artwork.midY),
-        size: frame.size, expanded: true, lyrics: lyrics))
-      if lyrics {
-        let text = artwork.offsetBy(dx: artwork.width + 30, dy: 0)
-        #expect(bounds.contains(text))
-        #expect(LockScreenGeometry.accepts(CGPoint(x: text.midX, y: text.midY),
-          size: frame.size, expanded: true, lyrics: true))
-        #expect(!LockScreenGeometry.accepts(CGPoint(x: artwork.maxX + 15, y: artwork.midY),
-          size: frame.size, expanded: true, lyrics: true))
-      }
-    }
+    #expect(frame.minY >= screen.minY + screen.height * 0.24)
+    #expect(frame.maxY <= screen.minY + screen.height * 0.74)
+    #expect(frame.width <= 380 && frame.height <= 164)
+    #expect(frame.midX == screen.midX)
   }
+  #expect(LockScreenGeometry.progress(position: 50, duration: 100) == 0.5)
+  #expect(LockScreenGeometry.progress(position: .nan, duration: 100) == 0)
+  #expect(LockScreenGeometry.progress(position: 10, duration: 0) == 0)
+  #expect(LockScreenGeometry.progress(position: 101, duration: 100) == 1)
+  #expect(LockScreenGeometry.progress(position: -1, duration: 100) == 0)
 }
 
 @Test func lockLifecycleSurvivesSessionDeactivationAndUnknownSnapshots() {
@@ -132,4 +123,213 @@ import Testing
   #expect(!music.playing && music.track?.id == "00000000000000FF")
   #expect(music.duration == 180 && music.position == nil)
   #expect(DesktopPlaybackNotice(userInfo: ["Name": "Incomplete"], source: .spotify) == nil)
+}
+
+@Test func lockPlacementRequiresPositiveSessionEvidence() {
+  #expect(!LockSessionSnapshot(locked: nil, onConsole: true).permitsPlacement)
+  #expect(!LockSessionSnapshot(locked: true, onConsole: nil).permitsPlacement)
+  #expect(!LockSessionSnapshot(locked: true, onConsole: false).permitsPlacement)
+  #expect(!LockSessionSnapshot(locked: false, onConsole: true).permitsPlacement)
+  #expect(LockSessionSnapshot(locked: true, onConsole: true).permitsPlacement)
+  var state = LockScreenLifecycle()
+  state.wake(observedLock: true, onConsole: nil)
+  #expect(!state.canPresent)
+}
+
+@Test func lockedTransportRequiresAnActualRecognizedSourceState() {
+  #expect(LockedPlaybackTransport.Observation(state: "playing", position: 5)?.playing == true)
+  #expect(LockedPlaybackTransport.Observation(state: "paused", position: 5)?.playing == false)
+  #expect(LockedPlaybackTransport.Observation(state: "stopped", position: -1)?.position == nil)
+  #expect(LockedPlaybackTransport.Observation(state: "playing", position: .nan)?.position == nil)
+  #expect(LockedPlaybackTransport.Observation(state: nil, position: 0) == nil)
+  #expect(LockedPlaybackTransport.Observation(state: "unknown", position: 0) == nil)
+}
+
+@MainActor private final class SkyLightFixture {
+  var calls: [String] = []
+  var failure: String?
+  var failureCode: Int32 = -1
+  func result(_ name: String) -> Int32 {
+    calls.append(name)
+    return failure == name ? failureCode : 0
+  }
+  var functions: SkyLightLockScreenPresenter.Functions {
+    .init(connection: { self.calls.append("connection"); return 1 },
+      create: { _, _, _ in self.calls.append("create"); return 42 },
+      level: { _, space, level in
+        #expect(space == 42 && level == 400)
+        return self.result("level")
+      },
+      show: { _, _ in self.calls.append("show") },
+      add: { _, _, _, selector in
+        #expect(selector == 7)
+        return self.result("adopt")
+      },
+      hide: { _, _ in self.result("hide") },
+      destroy: { _, _ in self.result("destroy") })
+  }
+}
+
+@Test @MainActor func skyLightPlacementReShowsTheSpaceOnWakeAndDestroysItOnUnlock() throws {
+  let fixture = SkyLightFixture()
+  let presenter = SkyLightLockScreenPresenter(functions: fixture.functions)
+  try presenter.place(window: 123, orderWindow: { fixture.calls.append("order") })
+  try presenter.place(window: 123, orderWindow: { fixture.calls.append("order") })
+  #expect(fixture.calls == ["connection", "create", "level", "show", "order", "adopt", "level", "show", "order", "adopt"])
+  try presenter.hide()
+  #expect(Array(fixture.calls.suffix(2)) == ["hide", "destroy"])
+  let count = fixture.calls.count
+  try presenter.hide()
+  #expect(fixture.calls.count == count)
+  try presenter.place(window: 124)
+  #expect(fixture.calls.filter { $0 == "create" }.count == 2)
+  try presenter.hide()
+}
+
+@Test @MainActor func skyLightFailuresDoNotReportPlacementSuccessAndCleanupStillRuns() throws {
+  for operation in ["level", "adopt"] {
+    let fixture = SkyLightFixture()
+    fixture.failure = operation
+    let presenter = SkyLightLockScreenPresenter(functions: fixture.functions)
+    #expect(throws: LockScreenPresentationError.self) { try presenter.place(window: 123) }
+    try presenter.hide()
+    #expect(Array(fixture.calls.suffix(2)) == ["hide", "destroy"])
+  }
+  let fixture = SkyLightFixture()
+  let presenter = SkyLightLockScreenPresenter(functions: fixture.functions)
+  #expect(throws: LockScreenPresentationError.self) { try presenter.place(window: 0) }
+  #expect(fixture.calls.isEmpty)
+  try presenter.place(window: 123)
+  fixture.failure = "destroy"
+  #expect(throws: LockScreenPresentationError.self) { try presenter.hide() }
+  fixture.failure = nil
+  try presenter.hide()
+  #expect(fixture.calls.filter { $0 == "destroy" }.count == 2)
+}
+
+@Test @MainActor func missingSkyLightSymbolsFailClosed() {
+  #expect(throws: LockScreenPresentationError.self) {
+    try SkyLightLockScreenPresenter.load(resolveSymbol: { _, _ in nil })
+  }
+}
+
+@MainActor private final class LockPlaybackFixture: DesktopPlayback {
+  var track: MusicTrack? = MusicTrack(title: "Compact player", artist: "Layout verification", album: "")
+  var isPlaying = true
+  var artwork: NSImage?
+  var duration: TimeInterval = 180
+  var title = "Compact player"
+  var subtitle = "Layout verification"
+  var canControlPlayback = true
+  var lastError: String?
+  var onChange: (@MainActor () -> Void)?
+  func start() { onChange?() }
+  func stop() {}
+  func refresh() {}
+  func togglePlayback() { isPlaying.toggle(); onChange?() }
+  func next() {}
+  func previous() {}
+  func playbackPosition(at date: Date) -> TimeInterval { 60 }
+  func seek(to position: TimeInterval, expectedTrackID: String) {}
+}
+
+@Test(.enabled(if: ProcessInfo.processInfo.environment["MINNOW_RENDER_LOCK_CARD"] == "1")) @MainActor
+func compactLockCardRendersGlassAndFrostedWithoutStartingAnotherMediaSession() async throws {
+  let music = LockPlaybackFixture()
+  let spotify = LockPlaybackFixture()
+  spotify.track = nil
+  spotify.isPlaying = false
+  let player = MediaPlayer(appleMusic: music, spotify: spotify)
+  player.start()
+  defer { player.stop() }
+  let view = HStack(spacing: 20) {
+    ForEach([true, false], id: \.self) { glass in
+      LockScreenPlayerView(player: player, useGlass: glass, togglePlayback: {})
+        .frame(width: 380, height: 164)
+    }
+  }.padding(20).background(Color.gray)
+  let host = NSHostingView(rootView: view)
+  let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 820, height: 204),
+    styleMask: [.borderless], backing: .buffered, defer: false)
+  window.isReleasedWhenClosed = false
+  defer { window.close() }
+  window.contentView = host
+  try await Task.sleep(for: .milliseconds(100))
+  host.layoutSubtreeIfNeeded()
+  let bitmap = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+  host.cacheDisplay(in: host.bounds, to: bitmap)
+  let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent(".build/ui-checks")
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+  try #require(bitmap.representation(using: .png, properties: [:]))
+    .write(to: directory.appendingPathComponent("lock-card.png"))
+}
+
+@Test func staleCanonicalLockAfterUnlockCannotRecreateThePanel() {
+  var state = LockScreenLifecycle()
+  state.lockChanged(true)
+  state.lockChanged(false)
+  state.reconcile(observedLock: true, onConsole: true)
+  #expect(!state.canPresent)
+  #expect(state.awaitingUnlockConfirmation)
+  state.reconcile(observedLock: false, onConsole: true)
+  #expect(!state.canPresent && !state.awaitingUnlockConfirmation)
+  state.reconcile(observedLock: true, onConsole: true)
+  #expect(state.canPresent) // A later lock can be discovered by polling.
+  state.sessionBecameActive()
+  state.reconcile(observedLock: true, onConsole: true)
+  #expect(!state.canPresent)
+}
+
+@Test @MainActor func windowOrderingCanSettleWithoutTurningPendingIntoSuccess() throws {
+  let fixture = SkyLightFixture()
+  fixture.failure = "adopt"
+  fixture.failureCode = -2
+  let presenter = SkyLightLockScreenPresenter(functions: fixture.functions)
+  do {
+    try presenter.place(window: 123)
+    Issue.record("Unordered window must not be reported as placed")
+  } catch let error as LockScreenPresentationError {
+    #expect(error.retryable)
+  }
+  fixture.failure = nil
+  try presenter.place(window: 123)
+  #expect(fixture.calls.filter { $0 == "create" }.count == 1)
+  try presenter.hide()
+}
+
+@MainActor private func playbackResult(_ playing: Bool) -> ScriptResult {
+  let value = NSAppleEventDescriptor.list()
+  value.insert(NSAppleEventDescriptor(string: playing ? "playing" : "paused"), at: 1)
+  value.insert(NSAppleEventDescriptor(int32: 60), at: 2)
+  return ScriptResult(value: value, errorCode: nil)
+}
+
+@Test @MainActor func lockedTransportSendsOneToggleAndWaitsForAnActualTransition() async {
+  for source in MusicSource.allCases {
+    for before in [true, false] {
+      var scripts: [String] = []
+      let result = await LockedPlaybackTransport.toggle(source, before: before, execute: { script in
+        scripts.append(script)
+        return playbackResult(scripts.count < 3 ? before : !before)
+      }, pause: {})
+      #expect(result?.playing == !before)
+      #expect(scripts.count == 3)
+      #expect(scripts.filter { $0.contains("playpause") }.count == 1)
+      #expect(scripts.allSatisfy { $0.contains(source.bundleIdentifier) })
+    }
+  }
+}
+
+@Test @MainActor func lockedTransportDoesNotInventSuccessFromAnUnchangedStateOrScriptError() async {
+  var reads = 0
+  let unchanged = await LockedPlaybackTransport.toggle(.spotify, before: true, execute: { _ in
+    reads += 1
+    return playbackResult(true)
+  }, pause: {})
+  #expect(unchanged == nil && reads == 10)
+  let denied = await LockedPlaybackTransport.toggle(.appleMusic, before: false, execute: { _ in
+    ScriptResult(value: NSAppleEventDescriptor(), errorCode: -1743)
+  }, pause: {})
+  #expect(denied == nil)
 }

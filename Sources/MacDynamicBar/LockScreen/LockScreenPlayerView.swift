@@ -1,63 +1,67 @@
 import SwiftUI
 
+/// The first hardware milestone has one control, and no artwork expansion or seeking.
 struct LockScreenPlayerView: View {
-  let session: IslandMediaSession
-  @ObservedObject var settings: MinnowSettings
-  @ObservedObject var lyrics: LyricsStore
-  var expansionChanged: (Bool, Bool) -> Void
-  @StateObject private var state = IslandState(hoverEnabled: false)
-  @State private var expanded = false
-  @State private var showLyrics = false
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @ObservedObject var player: MediaPlayer
+  let useGlass: Bool
+  let togglePlayback: () -> Void
+  @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
   var body: some View {
-    GeometryReader { geometry in
-      let card = LockScreenGeometry.cardFrame(size: geometry.size)
-      let art = LockScreenGeometry.artworkFrame(size: geometry.size, lyrics: showLyrics).width
-      VStack(spacing: 20) {
-        Spacer(minLength: 0)
-        if expanded {
-          HStack(spacing: 30) {
-            Button {
-              expanded = false
-            } label: {
-              SceneArtwork(player: session.player).frame(width: art, height: art)
+    VStack(spacing: 8) {
+      HStack(spacing: 13) {
+        Group {
+          if let artwork = player.artwork {
+            Image(nsImage: artwork).resizable().scaledToFill()
+          } else {
+            Image(systemName: "music.note").font(.system(size: 24, weight: .medium))
+              .frame(maxWidth: .infinity, maxHeight: .infinity).background(.white.opacity(0.12))
+          }
+        }.frame(width: 56, height: 56).clipShape(RoundedRectangle(cornerRadius: 11))
+          .accessibilityHidden(true)
+        VStack(alignment: .leading, spacing: 4) {
+          Text(player.track?.title ?? player.title)
+            .font(.system(size: 15, weight: .semibold)).lineLimit(1)
+          Text(player.track?.artist ?? "")
+            .font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.8)).lineLimit(1)
+        }.frame(maxWidth: .infinity, alignment: .leading)
+      }
+      TimelineView(.periodic(from: .now, by: 0.5)) { context in
+        let progress = LockScreenGeometry.progress(
+          position: player.playbackPosition(at: context.date), duration: player.duration)
+        GeometryReader { geometry in
+          Capsule().fill(.white.opacity(0.2))
+            .overlay(alignment: .leading) {
+              Capsule().fill(.white.opacity(0.9)).frame(width: geometry.size.width * progress)
             }
-            .buttonStyle(.plain).accessibilityLabel("Collapse album cover")
-            if showLyrics {
-              SceneLyricsView(player: session.player, lyrics: lyrics).frame(width: art, height: art)
-            }
-          }.frame(height: art)
+        }.frame(height: 3).padding(.top, 3)
+          .accessibilityLabel("Playback progress")
+          .accessibilityValue(player.duration > 0 ? "\(Int(progress * 100)) percent" : "Unavailable")
+      }
+      Button(action: togglePlayback) {
+        Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
+          .font(.system(size: 23, weight: .semibold)).frame(width: 44, height: 44)
+          .contentShape(Rectangle())
+      }.buttonStyle(.plain).disabled(!player.canControlPlayback)
+        .accessibilityLabel(player.isPlaying ? "Pause" : "Play")
+    }.padding(16)
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+      .foregroundStyle(.white)
+      .background {
+        // Always retain a readable backing even if WindowServer does not composite glass.
+        RoundedRectangle(cornerRadius: 24).fill(Color(white: 0.12).opacity(0.92))
+        if useGlass && !reduceTransparency {
+          if #available(macOS 26, *) {
+            Color.clear.glassEffect(.regular, in: RoundedRectangle(cornerRadius: 24))
+          } else {
+            RoundedRectangle(cornerRadius: 24).fill(.regularMaterial)
+          }
+        } else if !reduceTransparency {
+          RoundedRectangle(cornerRadius: 24).fill(.regularMaterial)
         }
-        VStack(spacing: 0) {
-          HStack {
-            Spacer()
-            Button {
-              showLyrics.toggle()
-              if showLyrics { expanded = true }
-            } label: {
-              Image(systemName: "quote.bubble").foregroundStyle(
-                showLyrics ? .white : .white.opacity(0.65))
-            }
-            .buttonStyle(.plain).accessibilityLabel("Toggle lyrics")
-          }.padding(.horizontal, 20).padding(.top, 10)
-          MusicView(
-            state: state, player: session.player, audio: session.audio,
-            accessories: session.accessories, outputs: session.outputs, settings: settings,
-            onArtworkPress: { expanded.toggle() })
-        }.frame(width: 408, height: 164)
-          .background { SceneGlass() }.clipShape(RoundedRectangle(cornerRadius: 28))
-          .overlay(
-            RoundedRectangle(cornerRadius: 28).strokeBorder(.white.opacity(0.25), lineWidth: 0.7))
-          .scaleEffect(card.width / 408, anchor: .bottom)
-          .frame(width: card.width, height: card.height)
-      }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-        .foregroundStyle(.white).preferredColorScheme(.dark)
-        .onAppear { if !state.isExpanded { state.toggle() } }
-        .onChange(of: expanded) { _, value in expansionChanged(value, showLyrics) }
-        .onChange(of: showLyrics) { _, value in expansionChanged(expanded, value) }
-        .animation(
-          reduceMotion ? nil : .spring(response: 0.4, dampingFraction: 0.86), value: expanded)
-    }
+      }
+      .clipShape(RoundedRectangle(cornerRadius: 24))
+      .overlay(RoundedRectangle(cornerRadius: 24).strokeBorder(.white.opacity(0.22), lineWidth: 0.7))
+      .preferredColorScheme(.dark)
   }
 }

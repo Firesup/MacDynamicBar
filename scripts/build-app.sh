@@ -27,6 +27,7 @@ iconutil -c icns "$PWD/.build/Minnow.iconset" -o "$app/Contents/Resources/Minnow
 cp ".build/$build_configuration/MacDynamicBar" "$app/Contents/MacOS/.MacDynamicBar.new"
 mv -f "$app/Contents/MacOS/.MacDynamicBar.new" "$app/Contents/MacOS/MacDynamicBar"
 cp Support/Info.plist "$app/Contents/Info.plist"
+cp Support/LockScreenThirdPartyNotices.txt "$app/Contents/Resources/LockScreenThirdPartyNotices.txt"
 plutil -lint "$app/Contents/Info.plist"
 # A persistent signing certificate keeps TCC permission identity across rebuilds.
 # The default ad-hoc identity changes with the executable and may need reauthorization.

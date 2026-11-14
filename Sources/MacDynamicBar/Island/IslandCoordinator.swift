@@ -13,7 +13,7 @@ final class IslandCoordinator {
   let shelf = ShelfStore()
   let widgets: WidgetServices
   lazy var lockScreen = LockScreenController(
-    session: session, settings: settings, widgets: widgets, readings: sceneWidgets)
+    session: session, settings: settings)
   private var musicScene: MusicSceneWindow?
   let airPods = AirPodsMonitor()
   private let battery = BatteryMonitor()
@@ -177,7 +177,7 @@ final class IslandCoordinator {
       }
     }
     let desktopAudio = anyVisible && settings.mediaEnabled && !hiddenAfterPause
-    session.audio.setSuspended(!(desktopAudio || lockScreen.isPresentingPlayer))
+    session.audio.setSuspended(!(desktopAudio || lockScreen.hasPlacedPlayer))
   }
 
   func refreshVisibility() {
