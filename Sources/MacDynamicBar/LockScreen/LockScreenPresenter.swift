@@ -8,7 +8,7 @@ import os
 @MainActor
 protocol LockScreenPresenting: AnyObject {
   func place(window: Int, orderWindow: () -> Void) throws
-  func hide() throws
+  func hide(window: Int?) throws
 }
 
 struct LockScreenPresentationError: Error, CustomStringConvertible {
@@ -25,6 +25,7 @@ final class SkyLightLockScreenPresenter: LockScreenPresenting {
     var level: (Int32, UInt64, Int32) -> Int32
     var show: (Int32, CFArray) -> Void
     var add: (Int32, UInt64, CFArray, Int32) -> Int32
+    var conceal: (Int32, UInt32) -> Int32
     var hide: (Int32, CFArray) -> Int32
     var destroy: (Int32, UInt64) -> Int32
   }
@@ -64,6 +65,8 @@ final class SkyLightLockScreenPresenter: LockScreenPresenting {
       let destroy = try resolve("SLSSpaceDestroy", (@convention(c) (Int32, UInt64) -> Void).self)
       let copySpaces = try resolve("SLSCopySpaces", (@convention(c) (Int32, Int32) -> Unmanaged<CFArray>?).self)
       let isOrdered = try resolve("SLSWindowIsOrderedIn", (@convention(c) (Int32, UInt32, UnsafeMutablePointer<UInt8>) -> Int32).self)
+      let setAlpha = try resolve("SLSSetWindowAlpha", (@convention(c) (Int32, UInt32, Float) -> Int32).self)
+      let orderWindow = try resolve("SLSOrderWindow", (@convention(c) (Int32, UInt32, Int32, UInt32) -> Int32).self)
       let copyWindowSpaces = try resolve("SLSCopySpacesForWindows", (@convention(c) (Int32, Int32, CFArray) -> Unmanaged<CFArray>?).self)
       func contains(_ array: Unmanaged<CFArray>?, _ space: UInt64) -> Bool? {
         guard let array, let numbers = array.takeRetainedValue() as? [NSNumber] else { return nil }
@@ -89,6 +92,20 @@ final class SkyLightLockScreenPresenter: LockScreenPresenting {
           // observation confirmed a visible panel while both lists omitted this space.
           // Keep membership as a diagnostic, not a reason to destroy a visible panel.
           return orderResult == 0 && ordered != 0 ? 0 : -2
+        },
+        conceal: { cid, window in
+          // Do both operations even if one fails. NSWindow.orderOut may defer its
+          // transaction until the next run-loop turn, exposing a desktop flash.
+          let alphaResult = setAlpha(cid, window, 0)
+          let outResult = orderWindow(cid, window, Int32(NSWindow.OrderingMode.out.rawValue), 0)
+          var ordered: UInt8 = 1
+          let queryResult = isOrdered(cid, window, &ordered)
+          let log = Logger(subsystem: "com.minnow.MacDynamicBar", category: "LockScreen")
+          log.info("WindowServer conceal window=\(window) alphaResult=\(alphaResult) orderOutResult=\(outResult) queryResult=\(queryResult) ordered=\(ordered)")
+          if alphaResult != 0 { return alphaResult }
+          if outResult != 0 { return outResult }
+          if queryResult != 0 { return queryResult }
+          return ordered == 0 ? 0 : -1
         },
         hide: { cid, spaces in
           guard let numbers = spaces as? [NSNumber], let sid = numbers.first?.uint64Value else { return -1 }
@@ -130,14 +147,23 @@ final class SkyLightLockScreenPresenter: LockScreenPresenting {
     try check(functions.add(connection, space, [windowID] as CFArray, 7), "adopt panel")
   }
 
-  func hide() throws {
-    guard space != 0 else { return }
-    let hidden = functions.hide(connection, [space] as CFArray)
-    let destroyed = functions.destroy(connection, space)
-    // Retain the ID when destruction fails so cleanup can be retried.
-    if destroyed == 0 { space = 0 }
-    try check(hidden, "hide space")
-    try check(destroyed, "destroy space")
+  func hide(window: Int? = nil) throws {
+    var concealResult: Int32?
+    if connection != 0, let window, let id = UInt32(exactly: window), id != 0 {
+      concealResult = functions.conceal(connection, id)
+    }
+    // Cleanup continues even if direct window concealment fails. Keep the space
+    // ID when destruction fails so the controller can retry on reconciliation.
+    if space != 0 {
+      let hidden = functions.hide(connection, [space] as CFArray)
+      let destroyed = functions.destroy(connection, space)
+      if destroyed == 0 { space = 0 }
+      if let concealResult { try check(concealResult, "conceal window") }
+      try check(hidden, "hide space")
+      try check(destroyed, "destroy space")
+    } else if let concealResult {
+      try check(concealResult, "conceal window")
+    }
   }
 
   private func check(_ result: Int32, _ operation: String) throws {

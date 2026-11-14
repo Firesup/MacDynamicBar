@@ -165,6 +165,10 @@ import Testing
         #expect(selector == 7)
         return self.result("adopt")
       },
+      conceal: { _, window in
+        #expect(window == 123)
+        return self.result("conceal")
+      },
       hide: { _, _ in self.result("hide") },
       destroy: { _, _ in self.result("destroy") })
   }
@@ -332,4 +336,36 @@ func compactLockCardRendersGlassAndFrostedWithoutStartingAnotherMediaSession() a
     ScriptResult(value: NSAppleEventDescriptor(), errorCode: -1743)
   }, pause: {})
   #expect(denied == nil)
+}
+
+@Test @MainActor func windowServerConcealsTheLiveWindowBeforeDestroyingItsSpace() throws {
+  let fixture = SkyLightFixture()
+  let presenter = SkyLightLockScreenPresenter(functions: fixture.functions)
+  try presenter.place(window: 123)
+  try presenter.hide(window: 123)
+  #expect(Array(fixture.calls.suffix(3)) == ["conceal", "hide", "destroy"])
+}
+
+@Test @MainActor func concealmentFailureStillCleansUpTheSpaceAndReportsFailure() throws {
+  let fixture = SkyLightFixture()
+  let presenter = SkyLightLockScreenPresenter(functions: fixture.functions)
+  try presenter.place(window: 123)
+  fixture.failure = "conceal"
+  #expect(throws: LockScreenPresentationError.self) { try presenter.hide(window: 123) }
+  #expect(Array(fixture.calls.suffix(3)) == ["conceal", "hide", "destroy"])
+  let count = fixture.calls.count
+  try presenter.hide()
+  #expect(fixture.calls.count == count)
+}
+
+@Test @MainActor func failedSpaceDestructionRemainsRetryableAfterWindowConcealment() throws {
+  let fixture = SkyLightFixture()
+  let presenter = SkyLightLockScreenPresenter(functions: fixture.functions)
+  try presenter.place(window: 123)
+  fixture.failure = "destroy"
+  #expect(throws: LockScreenPresentationError.self) { try presenter.hide(window: 123) }
+  fixture.failure = nil
+  try presenter.hide()
+  #expect(fixture.calls.filter { $0 == "destroy" }.count == 2)
+  #expect(fixture.calls.filter { $0 == "conceal" }.count == 1)
 }

@@ -119,7 +119,10 @@ struct LockSessionSnapshot {
     watchdog = Task { @MainActor [weak self] in
       while !Task.isCancelled {
         self?.refresh()
-        do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+        // Keep missed-unlock detection responsive while a high-level window exists.
+        // Dormant/unlocked monitoring retains the slower cadence.
+        let delay: Duration = self?.hasPlacedPlayer == true ? .milliseconds(50) : .milliseconds(250)
+        do { try await Task.sleep(for: delay) } catch { return }
       }
     }
     resume()
@@ -294,18 +297,21 @@ struct LockSessionSnapshot {
 
   private func hide(reason: String) {
     let hadPanel = panel != nil
-    // Order out and disable input before any space operation or async cancellation.
+    let window = panel?.windowNumber
+    // Preserve the live WindowServer ID until concealment is acknowledged. AppKit
+    // orderOut/close alone can commit after the desktop has already been exposed.
     panel?.ignoresMouseEvents = true
+    panel?.alphaValue = 0
     panel?.orderOut(nil)
+    do { try presenter?.hide(window: window) } catch {
+      if failure == nil { failure = String(describing: error) }
+      logger.error("window/space cleanup failed: \(String(describing: error), privacy: .public)")
+    }
     panel?.level = .normal
     panel?.close()
     panel = nil
     placed = false
     placementDeadline = nil
-    do { try presenter?.hide() } catch {
-      if failure == nil { failure = String(describing: error) }
-      logger.error("space cleanup failed: \(String(describing: error), privacy: .public)")
-    }
     if hadPanel { logger.info("panel removed: \(reason, privacy: .public)") }
   }
 
